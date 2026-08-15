@@ -112,6 +112,38 @@ class RedisSettings(BaseSettings):
         return self.dsn(reveal_password=False)
 
 
+class ProviderSettings(BaseSettings):
+    """Model provider selection and credentials (decision D11).
+
+    Provider choice is configuration; no business logic names a vendor.
+
+    ``embedding_dimensions`` is load-bearing beyond configuration: the stored
+    vector column is fixed at that width by migration, and a query embedded at a
+    different width cannot be compared to it. Changing this value is a schema
+    migration and a re-index of the whole corpus, not a restart.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="PROVIDER_",
+        env_file=_ENV_FILE,
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    # 'deterministic' is a test stand-in and is rejected outside local/test —
+    # see providers.registry.
+    embedding_provider: str = "deterministic"
+    embedding_model: str = "text-embedding-3-small"
+    embedding_dimensions: int = Field(default=1536, ge=1, le=4096)
+
+    chat_provider: str = "anthropic"
+    chat_model: str = "claude-opus-5"
+
+    openai_api_key: SecretStr = SecretStr("")
+    anthropic_api_key: SecretStr = SecretStr("")
+    google_api_key: SecretStr = SecretStr("")
+
+
 class LoggingSettings(BaseSettings):
     """Structured logging configuration (BUILD_SPEC §16)."""
 
@@ -147,6 +179,7 @@ class Settings(BaseSettings):
     postgres: PostgresSettings = Field(default_factory=PostgresSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
+    providers: ProviderSettings = Field(default_factory=ProviderSettings)
 
     @computed_field  # type: ignore[prop-decorator]
     @property

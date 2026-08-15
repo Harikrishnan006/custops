@@ -94,3 +94,10 @@ files = ["src", "tests"]
 # Alembic's generated env/templates are not part of the typed surface.
 module = "migrations.*"
 ignore_errors = true
+
+[[tool.mypy.overrides]]
+# Provider SDKs are optional at import time — the adapters import them lazily
+# and raise an actionable error when absent (see providers/*_provider.py), so
+# type-checking must not require them to be installed.
+module = ["openai.*", "google.*", "google.genai.*"]
+ignore_missing_imports = true
