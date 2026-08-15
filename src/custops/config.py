@@ -188,6 +188,39 @@ class PortalSettings(BaseSettings):
     timeout_ms: int = Field(default=15000, ge=1000, le=120000)
 
 
+class A2ASettings(BaseSettings):
+    """The Billing Specialist, reached over A2A (§9, D6).
+
+    Its own host and port because it is its own process. The orchestrator holds
+    a *URL*, not an import — which is the whole point of the decision: the
+    specialist could be rewritten in another language or moved to another host
+    without the orchestrator changing.
+
+    ``enabled`` defaults to False. The specialist is a second opinion, and a
+    platform whose main workflow silently depends on an optional process being
+    up is not one that degrades gracefully — it is one that has an undeclared
+    hard dependency. Turning it on is a deliberate act.
+
+    ``timeout_seconds`` is short on purpose. A slow second opinion is worth less
+    than a prompt local answer; the workflow must not stall behind it.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="A2A_",
+        env_file=_ENV_FILE,
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    enabled: bool = False
+
+    host: str = "127.0.0.1"
+    port: int = Field(default=8200, ge=1, le=65535)
+    billing_specialist_url: str = "http://127.0.0.1:8200"
+
+    timeout_seconds: float = Field(default=5.0, gt=0, le=60)
+
+
 class LoggingSettings(BaseSettings):
     """Structured logging configuration (BUILD_SPEC §16)."""
 
@@ -225,6 +258,7 @@ class Settings(BaseSettings):
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     providers: ProviderSettings = Field(default_factory=ProviderSettings)
     portal: PortalSettings = Field(default_factory=PortalSettings)
+    a2a: A2ASettings = Field(default_factory=A2ASettings)
 
     @computed_field  # type: ignore[prop-decorator]
     @property

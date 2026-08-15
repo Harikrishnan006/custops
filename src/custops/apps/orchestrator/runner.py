@@ -26,6 +26,7 @@ from typing import Any
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
+from custops.a2a.client.billing import BillingSpecialistClient
 from custops.agents.budgets import BudgetPolicy
 from custops.agents.nodes import NodeDependencies, build_nodes
 from custops.agents.state import WorkflowState, WorkflowStatus, initial_state
@@ -39,8 +40,20 @@ from custops.observability.events import ActorType, EventType
 from custops.observability.logging import get_logger
 from custops.providers.chat import ChatProvider
 from custops.providers.registry import get_embedding_provider
+from custops.provisioning.client import ProvisioningClient
+from custops.provisioning.playwright_client import PlaywrightProvisioningClient
 
 logger = get_logger(__name__)
+
+
+def _specialist_from(settings: Settings) -> BillingSpecialistClient | None:
+    """Build the A2A client only when the specialist is switched on."""
+    if not settings.a2a.enabled:
+        return None
+    return BillingSpecialistClient(
+        settings.a2a.billing_specialist_url,
+        timeout_seconds=settings.a2a.timeout_seconds,
+    )
 
 # Keys that are graph plumbing rather than workflow state, and must not be
 # persisted as if they were.
@@ -78,12 +91,27 @@ class WorkflowRunner:
         chat: ChatProvider,
         budget_policy: BudgetPolicy | None = None,
         in_memory_checkpointer: bool = False,
+        provisioning: ProvisioningClient | None = None,
+        billing_specialist: BillingSpecialistClient | None = None,
     ) -> None:
         self._settings = settings
         self._database = database
         self._chat = chat
         self._budget_policy = budget_policy
         self._in_memory = in_memory_checkpointer
+        # Default to the real portal driver. Phase 8 built it but left the
+        # runner passing None, so the API-driven workflow could not provision at
+        # all and every run failed validation for a missing entitlement — the
+        # one outcome Phase 8 existed to eliminate. Injectable so a test can
+        # substitute the labelled stub.
+        self._provisioning = (
+            provisioning
+            if provisioning is not None
+            else PlaywrightProvisioningClient(settings.portal)
+        )
+        # Off unless configured. A main workflow that silently depends on an
+        # optional process being up has an undeclared hard dependency (ADR-006).
+        self._billing_specialist = billing_specialist or _specialist_from(settings)
 
     async def start(self, *, raw_request: str, request_id: str | None = None) -> RunOutcome:
         """Begin a new run, returning when it completes or pauses."""
@@ -125,6 +153,8 @@ class WorkflowRunner:
             session_factory=self._database.session_factory,
             chat=self._chat,
             embedder=embedder,
+            provisioning=self._provisioning,
+            billing_specialist=self._billing_specialist,
         )
         nodes = build_nodes(deps)
         config: RunnableConfig = {"configurable": {"thread_id": str(execution_id)}}

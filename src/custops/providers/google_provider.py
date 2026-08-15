@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 from typing import Any
 
 from custops.providers.base import (
@@ -35,8 +36,14 @@ class GoogleEmbeddingProvider:
         if client is not None:
             self._client = client
         else:
+            # Imported dynamically because 'google-genai' is optional and not a
+            # declared dependency. A static `from google import genai` also fails
+            # type checking whenever some *other* distribution owns the shared
+            # `google` namespace — a2a-sdk's protobuf dependencies do exactly
+            # that — which turns an absent optional package into a type error in
+            # an unrelated build.
             try:
-                from google import genai
+                genai = importlib.import_module("google.genai")
             except ImportError as error:  # pragma: no cover - dependency guard
                 raise ProviderError(
                     "The 'google-genai' package is required for the Google provider. "

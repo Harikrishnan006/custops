@@ -27,10 +27,15 @@ dependencies = [
     "langgraph-checkpoint-postgres>=3.1.2",
     "psycopg[binary]>=3.3.4",
     "playwright>=1.62.0",
+    "a2a-sdk>=1.1.2",
 ]
 
 [project.scripts]
 custops = "custops.cli:main"
+# The Billing Specialist is a separate process (D6), so it gets its own entry
+# point rather than a flag on the API. Started independently, it needs
+# PostgreSQL and nothing else in the platform.
+custops-billing-specialist = "custops.apps.billing_specialist.app:main"
 
 [dependency-groups]
 dev = [

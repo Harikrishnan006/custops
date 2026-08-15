@@ -29,6 +29,12 @@ from langgraph.types import interrupt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from custops.a2a.client.billing import (
+    BillingSpecialistClient,
+    ConsultResult,
+    ConsultStatus,
+    corroborates,
+)
 from custops.agents.schemas import NotificationDraft, PlanDraft, RequestClassification
 from custops.agents.state import (
     ApprovalState,
@@ -101,6 +107,10 @@ class NodeDependencies:
     # a browser; the execute step then fails honestly rather than skipping
     # provisioning and letting validation call the result a success.
     provisioning: ProvisioningClient | None = None
+    # The out-of-process Billing Specialist (§9, D6). Optional in the strong
+    # sense: when it is absent or unreachable the workflow reaches the same
+    # decision from the same local rules, and records that it went unconsulted.
+    billing_specialist: BillingSpecialistClient | None = None
     approval_policy: ApprovalPolicy | None = None
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
 
@@ -378,29 +388,68 @@ def build_nodes(deps: NodeDependencies) -> NodeSet:
                 "escalation_reason": f"Upgrade blocked: {', '.join(blockers)}.",
             }
 
+        # Consult the specialist only once the local rules have cleared the
+        # upgrade. A blocked upgrade escalates regardless, so a network round
+        # trip to corroborate a 'no' buys nothing.
+        consult = await _consult_specialist(account_id, target, state)
+        agrees, divergence = corroborates(consult, local_amount=assessment.proration.amount_due)
+
+        # The specialist may only ever *raise* the approval bar. It reads a
+        # subset of the data (no customer standing, no negotiated discounts), so
+        # its 'no approval needed' is uninformed rather than reassuring — and a
+        # remote agent that could clear a human gate would put the approval
+        # decision outside the audited local path entirely (D9).
         needs_approval = assessment.approval.required
+        extra_triggers: list[str] = []
+        if consult.recommendation is not None and consult.recommendation.approval_indicated:
+            needs_approval = True
+            extra_triggers.append("specialist_indicated_approval")
+        if divergence is not None:
+            # Two systems reading the same account and pricing it differently is
+            # precisely a human-review case: one of them is reading stale or
+            # wrong state, and neither side can tell which from here.
+            needs_approval = True
+            extra_triggers.append("specialist_amount_divergence")
+
+        decisions = [
+            _decision(
+                "upgrade_eligibility",
+                "eligible",
+                1.0,
+                "All deterministic eligibility checks passed.",
+                _evidence_refs(assessment),
+                now,
+            ),
+            _decision(
+                "pricing",
+                str(assessment.proration.amount_due),
+                1.0,
+                f"Proration {assessment.proration.amount_due} "
+                f"{assessment.proration.currency} for "
+                f"{assessment.proration.days_remaining} of "
+                f"{assessment.proration.days_in_period} days.",
+                [],
+                now,
+            ),
+        ]
+        if deps.billing_specialist is not None:
+            # Record the consultation whenever one was attempted — including
+            # when it failed. "We asked and could not reach it" belongs in the
+            # trace; silence would read as "we never needed a second opinion".
+            decisions.append(
+                _decision(
+                    "billing_specialist_consultation",
+                    str(consult.status),
+                    consult.recommendation.confidence if consult.recommendation else 0.0,
+                    divergence
+                    or (consult.detail if consult.detail else "Specialist agreed on the amount."),
+                    consult.recommendation.evidence_refs if consult.recommendation else [],
+                    now,
+                )
+            )
+
         return {
-            "decisions": [
-                _decision(
-                    "upgrade_eligibility",
-                    "eligible",
-                    1.0,
-                    "All deterministic eligibility checks passed.",
-                    _evidence_refs(assessment),
-                    now,
-                ),
-                _decision(
-                    "pricing",
-                    str(assessment.proration.amount_due),
-                    1.0,
-                    f"Proration {assessment.proration.amount_due} "
-                    f"{assessment.proration.currency} for "
-                    f"{assessment.proration.days_remaining} of "
-                    f"{assessment.proration.days_in_period} days.",
-                    [],
-                    now,
-                ),
-            ],
+            "decisions": decisions,
             "approval_status": (
                 ApprovalState.REQUIRED if needs_approval else ApprovalState.NOT_REQUIRED
             ),
@@ -411,10 +460,34 @@ def build_nodes(deps: NodeDependencies) -> NodeSet:
                 **(state.get("metadata") or {}),
                 "proration_amount": str(assessment.proration.amount_due),
                 "current_plan_code": assessment.current_plan_code,
-                "approval_triggers": [str(t) for t in assessment.approval.triggers],
+                "approval_triggers": [
+                    *(str(t) for t in assessment.approval.triggers),
+                    *extra_triggers,
+                ],
                 "approval_reasons": list(assessment.approval.reasons),
+                "billing_specialist": {**consult.as_trace(), "agrees": agrees},
             },
         }
+
+    async def _consult_specialist(
+        account_id: uuid.UUID, target: str, state: WorkflowState
+    ) -> ConsultResult:
+        """Ask the Billing Specialist, tolerating its absence.
+
+        Not configured is reported the same way as not reachable: in both cases
+        the workflow has no second opinion, and the trace should say so rather
+        than distinguish a deployment choice from an outage.
+        """
+        if deps.billing_specialist is None:
+            return ConsultResult(
+                status=ConsultStatus.UNAVAILABLE,
+                detail="No billing specialist is configured.",
+            )
+        return await deps.billing_specialist.request_pricing_decision(
+            account_id=account_id,
+            target_plan_code=target,
+            execution_id=state.get("execution_id"),
+        )
 
     def _escalate_update(reason: str) -> dict[str, Any]:
         return {
