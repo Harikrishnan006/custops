@@ -15,18 +15,21 @@ not text.
 - **Full specification:** [docs/BUILD_SPEC.md](docs/BUILD_SPEC.md)
 - **Decisions:** [docs/decisions/](docs/decisions/)
 
-> ### Current status: Phases 1–2 of 14 complete
+> ### Current status: Phases 1–3 of 14 complete
 >
 > **Phase 1** — foundation: configuration, structured logging, database,
 > migrations, health checking.
 > **Phase 2** — domain model, deterministic business rules (pricing, eligibility,
 > approval thresholds), the enterprise systems of record, and seed data.
+> **Phase 3** — model provider abstraction, document ingestion and chunking,
+> pgvector retrieval, and the Evidence model.
 >
 > There are no agents, no LangGraph, no MCP tools and no workflows yet — they
 > arrive in their own phases and are deliberately absent rather than stubbed.
 > Per-phase reports, including what is verified and what is not, are in
-> [docs/PHASE-01-COMPLETION.md](docs/PHASE-01-COMPLETION.md) and
-> [docs/PHASE-02-COMPLETION.md](docs/PHASE-02-COMPLETION.md).
+> [docs/PHASE-01-COMPLETION.md](docs/PHASE-01-COMPLETION.md),
+> [docs/PHASE-02-COMPLETION.md](docs/PHASE-02-COMPLETION.md) and
+> [docs/PHASE-03-COMPLETION.md](docs/PHASE-03-COMPLETION.md).
 
 ---
 
@@ -136,6 +139,13 @@ eligibility path — see [seed.py](src/custops/domain/seed.py)):
 
 ```bash
 uv run custops seed
+```
+
+Embed the policies and contracts so they can be retrieved as evidence
+(idempotent — unchanged documents are skipped):
+
+```bash
+uv run custops ingest
 ```
 
 ```bash

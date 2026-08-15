@@ -150,4 +150,4 @@ created in advance.
 | [002](../decisions/ADR-002-postgres-with-pgvector.md) | One PostgreSQL, pgvector as extension | Accepted |
 | [003](../decisions/ADR-003-redis-role.md) | What Redis is for | 🟡 Open — Phase 5 |
 | 004 | Orchestration framework: LangGraph vs CrewAI | Reserved — Phase 10 (§10) |
-| 005 | pgvector index type | Reserved — Phase 3 (§5) |
+| [005](../decisions/ADR-005-pgvector-index-type.md) | HNSW over IVFFlat for the pgvector index | Accepted |

@@ -16,7 +16,9 @@ from datetime import UTC, datetime
 from custops.config import get_settings
 from custops.db.engine import create_database
 from custops.domain.seed import clear_seed_data, seed_all
+from custops.knowledge.ingestion.pipeline import ingest_contracts, ingest_policies
 from custops.observability.logging import configure_logging, get_logger
+from custops.providers.registry import get_embedding_provider
 
 logger = get_logger(__name__)
 
@@ -42,6 +44,36 @@ async def _seed(*, reset: bool) -> int:
     return 0
 
 
+async def _ingest() -> int:
+    """Embed policies and contracts into the knowledge corpus.
+
+    Idempotent: unchanged documents are skipped without re-embedding, so this
+    is safe to run on every deploy.
+    """
+    settings = get_settings()
+    provider = get_embedding_provider(settings)
+    database = create_database(settings)
+
+    logger.info("ingestion_started", provider=provider.model, dimensions=provider.dimensions)
+    try:
+        async with database.session_factory() as session:
+            policies = await ingest_policies(session, provider)
+            contracts = await ingest_contracts(session, provider)
+            await session.commit()
+
+        logger.info(
+            "ingestion_finished",
+            policy_documents=policies.documents_processed,
+            policy_chunks=policies.chunks_written,
+            contract_documents=contracts.documents_processed,
+            contract_chunks=contracts.chunks_written,
+        )
+    finally:
+        await database.dispose()
+
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="custops", description="custops operator commands")
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -53,12 +85,17 @@ def main(argv: list[str] | None = None) -> int:
         help="delete seeded customers first (only rows this seed created)",
     )
 
+    subcommands.add_parser("ingest", help="embed policies and contracts for retrieval")
+
     arguments = parser.parse_args(argv)
 
     configure_logging(get_settings())
 
     if arguments.command == "seed":
         return asyncio.run(_seed(reset=bool(arguments.reset)))
+
+    if arguments.command == "ingest":
+        return asyncio.run(_ingest())
 
     # argparse's `required=True` makes this unreachable in practice; error()
     # is NoReturn, so there is nothing to return afterwards.

@@ -14,6 +14,7 @@ from custops.domain.models.contract import Contract, Policy
 from custops.domain.models.customer import Account, Contact, Customer
 from custops.domain.models.entitlement import Entitlement
 from custops.domain.models.identity import Role, User, UserRole
+from custops.domain.models.knowledge import KnowledgeChunk, KnowledgeDocument
 from custops.domain.models.support import Conversation, SupportTicket
 
 __all__ = [
@@ -26,6 +27,8 @@ __all__ = [
     "Discount",
     "Entitlement",
     "Invoice",
+    "KnowledgeChunk",
+    "KnowledgeDocument",
     "Payment",
     "Plan",
     "Policy",
