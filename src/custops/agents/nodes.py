@@ -484,25 +484,30 @@ def build_nodes(deps: NodeDependencies) -> NodeSet:
             }
         )
 
-        approved = bool(decision.get("approved")) if isinstance(decision, dict) else False
-        note = decision.get("note") if isinstance(decision, dict) else None
-        decided_by = decision.get("decided_by_user_id") if isinstance(decision, dict) else None
+        # The decision is *read*, never written here. Layer 2 of §13 puts
+        # recording the human's decision — with actor and timestamp — in the
+        # approval API, and that row is the authority. A second write path in
+        # this node would let the graph's view and the audit record diverge,
+        # and the divergence would favour whichever ran last.
+        #
+        # The resumed value is therefore only a signal that a decision exists;
+        # what it *was* comes from the database.
+        del decision
 
         async with deps.session_factory() as session:
             record = await session.get(Approval, approval_id)
-            if record is not None:
-                record.status = ApprovalStatus.APPROVED if approved else ApprovalStatus.REJECTED
-                record.decided_at = deps.clock()
-                record.decision_note = note
-                if decided_by:
-                    record.decided_by_user_id = uuid.UUID(str(decided_by))
-            await session.commit()
+            approved = record is not None and record.status == ApprovalStatus.APPROVED
+            recorded_status = record.status if record is not None else "missing"
 
         return {
             "approval_id": approval_id,
             "approval_status": (ApprovalState.GRANTED if approved else ApprovalState.REJECTED),
             "status": WorkflowStatus.EXECUTING if approved else WorkflowStatus.ESCALATED,
-            "escalation_reason": None if approved else "Approval was refused.",
+            "escalation_reason": (
+                None
+                if approved
+                else f"Approval was not granted (recorded status: {recorded_status})."
+            ),
         }
 
     # ------------------------------------------------------------------- execute

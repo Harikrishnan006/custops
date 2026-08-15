@@ -45,6 +45,7 @@ from custops.domain.models.billing import Discount, Invoice, Plan, Subscription
 from custops.domain.models.contract import Contract, Policy
 from custops.domain.models.customer import Account, Contact, Customer
 from custops.domain.models.entitlement import Entitlement
+from custops.domain.models.identity import Role, User, UserRole
 from custops.domain.models.support import Conversation, SupportTicket
 
 # Fixed namespace: changing this regenerates every id in the seed set.
@@ -313,6 +314,83 @@ POLICIES: tuple[dict[str, Any], ...] = (
 )
 
 
+# Approvers, so the approval API has someone to authorise against (§13, §17).
+# Three deliberately different actors: routine authority, elevated authority,
+# and a deactivated account that must be refused.
+SEED_ROLES: tuple[dict[str, str], ...] = (
+    {"name": "approver", "description": "May approve routine operations."},
+    {"name": "finance_approver", "description": "May approve high-value operations."},
+    {"name": "viewer", "description": "Read-only; carries no approval authority."},
+)
+
+SEED_USERS: tuple[dict[str, Any], ...] = (
+    {
+        "key": "ops",
+        "email": "ops.approver@custops.example.com",
+        "full_name": "Ops Approver",
+        "is_active": True,
+        "roles": ("approver",),
+    },
+    {
+        "key": "finance",
+        "email": "finance.approver@custops.example.com",
+        "full_name": "Finance Approver",
+        "is_active": True,
+        "roles": ("approver", "finance_approver"),
+    },
+    {
+        # Holds no approving role — exercises the authority refusal path.
+        "key": "viewer",
+        "email": "viewer@custops.example.com",
+        "full_name": "Read Only",
+        "is_active": True,
+        "roles": ("viewer",),
+    },
+    {
+        # Deactivated — a role alone must not confer authority.
+        "key": "former",
+        "email": "former.approver@custops.example.com",
+        "full_name": "Former Approver",
+        "is_active": False,
+        "roles": ("approver",),
+    },
+)
+
+
+async def _seed_identity(session: AsyncSession, now: datetime) -> int:
+    for role_data in SEED_ROLES:
+        await session.merge(
+            Role(
+                id=seed_id("role", role_data["name"]),
+                name=role_data["name"],
+                description=role_data["description"],
+            )
+        )
+
+    for user_data in SEED_USERS:
+        await session.merge(
+            User(
+                id=seed_id("user", str(user_data["key"])),
+                email=user_data["email"],
+                full_name=user_data["full_name"],
+                is_active=user_data["is_active"],
+            )
+        )
+    await session.flush()
+
+    for user_data in SEED_USERS:
+        for role_name in user_data["roles"]:
+            await session.merge(
+                UserRole(
+                    user_id=seed_id("user", str(user_data["key"])),
+                    role_id=seed_id("role", role_name),
+                    granted_at=now,
+                )
+            )
+    await session.flush()
+    return len(SEED_USERS)
+
+
 async def seed_all(session: AsyncSession, *, now: datetime | None = None) -> dict[str, int]:
     """Populate the database with the synthetic catalogue.
 
@@ -323,6 +401,7 @@ async def seed_all(session: AsyncSession, *, now: datetime | None = None) -> dic
     reference = now if now is not None else datetime.now(UTC)
 
     counts = {
+        "users": await _seed_identity(session, reference),
         "plans": await _seed_plans(session),
         "policies": await _seed_policies(session, reference),
         "customers": 0,

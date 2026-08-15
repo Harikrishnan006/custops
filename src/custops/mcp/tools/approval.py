@@ -36,6 +36,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from custops.domain.models.approval import Approval, ApprovalStatus
+from custops.domain.policies.approval_authority import ApprovalAuthorityPolicy, is_stale
 from custops.mcp.tools.results import ToolErrorCode, ToolExecutionError
 
 
@@ -55,6 +56,7 @@ async def verify_approval(
     *,
     consume: bool = True,
     now: datetime | None = None,
+    authority_policy: ApprovalAuthorityPolicy | None = None,
 ) -> Approval:
     """Return the approval authorising ``requirement``, or raise.
 
@@ -104,6 +106,22 @@ async def verify_approval(
                 f"Approval {approval.id} was already used at "
                 f"{approval.consumed_at.isoformat()}; one human decision authorises "
                 "one action."
+            ),
+            approval_id=str(approval.id),
+        )
+
+    # Freshness. An approval granted against one state of the world must not be
+    # spendable weeks later against a different one — a replay in slow motion.
+    # Checked here, in the tool layer, rather than trusting a sweeper job to
+    # have flipped the status: layer 3's whole point is that it verifies for
+    # itself (D9).
+    if is_stale(decided_at=approval.decided_at, now=timestamp, policy=authority_policy):
+        raise ToolExecutionError(
+            ToolErrorCode.APPROVAL_NOT_GRANTED,
+            (
+                f"Approval {approval.id} was decided at "
+                f"{approval.decided_at.isoformat() if approval.decided_at else 'an unknown time'} "
+                "and is no longer current."
             ),
             approval_id=str(approval.id),
         )
