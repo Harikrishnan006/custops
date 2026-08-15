@@ -30,6 +30,7 @@ from custops.mcp.tools.schemas import (
     CustomerOutput,
     EvidenceItemOutput,
     GetCustomerInput,
+    GetEntitlementOutput,
     GetPricingInput,
     GetSupportHistoryInput,
     InvoiceListOutput,
@@ -41,10 +42,17 @@ from custops.mcp.tools.schemas import (
     SupportSummaryOutput,
     UpdateCrmInput,
     UpdateCrmOutput,
+    UpdateEntitlementInput,
+    UpdateEntitlementOutput,
     UpdateSubscriptionInput,
     UpdateSubscriptionOutput,
 )
 from custops.providers.base import EmbeddingProvider
+from custops.provisioning.client import (
+    ProvisioningClient,
+    ProvisioningError,
+    ProvisioningErrorCode,
+)
 
 
 async def get_customer(context: ToolContext, arguments: GetCustomerInput) -> CustomerOutput:
@@ -235,6 +243,81 @@ async def update_subscription(
         previous_plan_code=previous,
         new_plan_code=target.code,
     )
+
+
+def make_update_entitlement(
+    client: ProvisioningClient,
+) -> Callable[[ToolContext, UpdateEntitlementInput], Awaitable[UpdateEntitlementOutput]]:
+    """Bind a provisioning client into the entitlement-flip handler.
+
+    The legacy portal has no API, so this is the browser step (§11, D8). It is
+    still an ordinary MCP tool: permission-checked, approval-gated and audited
+    like every other mutation. Having no API is not a reason to escape the
+    boundary — if anything it is a reason to insist on it, since a browser
+    driver is the least observable thing in the system.
+    """
+
+    async def update_entitlement(
+        context: ToolContext, arguments: UpdateEntitlementInput
+    ) -> UpdateEntitlementOutput:
+        try:
+            result = await client.set_tier(
+                account_id=str(arguments.account_id),
+                tier=arguments.tier,
+                seats=arguments.seats,
+            )
+        except ProvisioningError as error:
+            raise ToolExecutionError(
+                _PROVISIONING_ERROR_CODES.get(error.code, ToolErrorCode.UPSTREAM_ERROR),
+                error.message,
+                portal_error=str(error.code),
+            ) from error
+
+        return UpdateEntitlementOutput(
+            account_id=arguments.account_id,
+            requested_tier=result.requested_tier,
+            confirmed_tier=result.confirmed_tier,
+            seats=result.seats,
+            matches_request=result.matches_request,
+            confirmation_text=result.confirmation_text,
+        )
+
+    return update_entitlement
+
+
+def make_get_entitlement(
+    client: ProvisioningClient,
+) -> Callable[[ToolContext, AccountInput], Awaitable[GetEntitlementOutput]]:
+    """Read the provisioned tier from the portal, for validation (§14)."""
+
+    async def get_entitlement(
+        context: ToolContext, arguments: AccountInput
+    ) -> GetEntitlementOutput:
+        try:
+            tier = await client.read_tier(account_id=str(arguments.account_id))
+        except ProvisioningError as error:
+            raise ToolExecutionError(
+                _PROVISIONING_ERROR_CODES.get(error.code, ToolErrorCode.UPSTREAM_ERROR),
+                error.message,
+                portal_error=str(error.code),
+            ) from error
+
+        return GetEntitlementOutput(account_id=arguments.account_id, tier=tier)
+
+    return get_entitlement
+
+
+# Portal failures mapped to the codes the graph routes on. A timeout is
+# transient and worth retrying; a rejected tier or a missing account is not.
+_PROVISIONING_ERROR_CODES = {
+    ProvisioningErrorCode.TIMEOUT: ToolErrorCode.UPSTREAM_TIMEOUT,
+    ProvisioningErrorCode.LOGIN_FAILED: ToolErrorCode.UPSTREAM_ERROR,
+    ProvisioningErrorCode.BROWSER_UNAVAILABLE: ToolErrorCode.UPSTREAM_ERROR,
+    ProvisioningErrorCode.ACCOUNT_NOT_FOUND: ToolErrorCode.NOT_FOUND,
+    ProvisioningErrorCode.TIER_REJECTED: ToolErrorCode.PRECONDITION_FAILED,
+    ProvisioningErrorCode.CONFIRMATION_MISSING: ToolErrorCode.PRECONDITION_FAILED,
+    ProvisioningErrorCode.UNEXPECTED: ToolErrorCode.INTERNAL_ERROR,
+}
 
 
 async def update_crm(context: ToolContext, arguments: UpdateCrmInput) -> UpdateCrmOutput:

@@ -146,3 +146,36 @@ class UpdateCrmOutput(BaseModel):
     account_id: uuid.UUID
     current_plan_code: str
     changed_at: datetime
+
+
+class UpdateEntitlementInput(BaseModel):
+    account_id: uuid.UUID
+    tier: str = Field(min_length=1, max_length=32)
+    seats: int = Field(default=1, ge=1)
+
+
+class UpdateEntitlementOutput(BaseModel):
+    """What the portal reported after the browser submitted the form.
+
+    ``confirmed_tier`` is read back from the page, so it can differ from
+    ``requested_tier``. ``matches_request`` makes that difference explicit
+    rather than leaving a caller to compare two strings and forget.
+    """
+
+    account_id: uuid.UUID
+    requested_tier: str
+    confirmed_tier: str
+    seats: int
+    matches_request: bool
+    confirmation_text: str
+
+
+class GetEntitlementOutput(BaseModel):
+    """The provisioned tier, read from the portal itself.
+
+    ``None`` means the portal has no entitlement for the account — different
+    from a tier that disagrees, and reported differently by the Validator.
+    """
+
+    account_id: uuid.UUID
+    tier: str | None

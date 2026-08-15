@@ -56,6 +56,10 @@ class ToolName(StrEnum):
     UPDATE_CRM = "update_crm"
     SEARCH_KNOWLEDGE = "search_knowledge"
     SEND_NOTIFICATION = "send_notification"
+    # Drives the legacy portal via a browser (§11, D8). A tool like any other:
+    # having no API is not a reason to escape the permission boundary.
+    UPDATE_ENTITLEMENT = "update_entitlement"
+    GET_ENTITLEMENT = "get_entitlement"
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +119,9 @@ PERMISSION_MATRIX: Mapping[str, ToolPolicy] = MappingProxyType(
         ToolName.SEARCH_KNOWLEDGE: _policy(
             ToolName.SEARCH_KNOWLEDGE, mutating=False, roles=(*_READERS, Role.PLANNER)
         ),
+        # Reading the portal is how the Validator confirms provisioning actually
+        # happened, so the Validator must be able to call it.
+        ToolName.GET_ENTITLEMENT: _policy(ToolName.GET_ENTITLEMENT, mutating=False, roles=_READERS),
         # --- Mutating: Execution only, and each needs an approval record. ---
         ToolName.UPDATE_SUBSCRIPTION: _policy(
             ToolName.UPDATE_SUBSCRIPTION,
@@ -127,6 +134,12 @@ PERMISSION_MATRIX: Mapping[str, ToolPolicy] = MappingProxyType(
             mutating=True,
             roles=(Role.EXECUTION, Role.ADMIN),
             approval_action="update_crm",
+        ),
+        ToolName.UPDATE_ENTITLEMENT: _policy(
+            ToolName.UPDATE_ENTITLEMENT,
+            mutating=True,
+            roles=(Role.EXECUTION, Role.ADMIN),
+            approval_action="subscription_upgrade",
         ),
         ToolName.CREATE_REFUND: _policy(
             ToolName.CREATE_REFUND,

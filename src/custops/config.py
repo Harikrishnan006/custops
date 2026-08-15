@@ -158,6 +158,36 @@ class ProviderSettings(BaseSettings):
     google_api_key: SecretStr = SecretStr("")
 
 
+class PortalSettings(BaseSettings):
+    """The legacy provisioning portal (§11, D8).
+
+    Its own credentials, deliberately separate from anything else: a legacy
+    system that shares the application's identity store is not a separate system,
+    and the integration problem this portal exists to demonstrate would vanish.
+
+    ``base_url`` is where Playwright points. ``headless`` is False only for
+    watching a run locally; automation always runs headless.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="PORTAL_",
+        env_file=_ENV_FILE,
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    host: str = "127.0.0.1"
+    port: int = Field(default=8100, ge=1, le=65535)
+    base_url: str = "http://127.0.0.1:8100"
+
+    username: str = "provisioning.operator"
+    password: SecretStr = SecretStr("change-me-locally")
+
+    headless: bool = True
+    # A form submission that hangs must fail the step rather than the workflow.
+    timeout_ms: int = Field(default=15000, ge=1000, le=120000)
+
+
 class LoggingSettings(BaseSettings):
     """Structured logging configuration (BUILD_SPEC §16)."""
 
@@ -194,6 +224,7 @@ class Settings(BaseSettings):
     redis: RedisSettings = Field(default_factory=RedisSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     providers: ProviderSettings = Field(default_factory=ProviderSettings)
+    portal: PortalSettings = Field(default_factory=PortalSettings)
 
     @computed_field  # type: ignore[prop-decorator]
     @property

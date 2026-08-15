@@ -1,11 +1,15 @@
 """Agent nodes against real systems of record.
 
-The test that matters most here is
-``test_a_successful_execution_still_fails_validation``: billing and the CRM both
-accept the upgrade, and validation refuses to pass because nothing provisioned
-the entitlement. That is decision D8 arriving on schedule — the Playwright step
-that flips the portal is Phase 8 — and the workflow correctly reporting its own
-incompleteness rather than declaring success.
+Two tests carry most of the weight, and they are a matched pair:
+
+``test_a_fully_provisioned_execution_passes_validation`` runs the whole chain —
+Billing → CRM → Legacy Portal → validation — and expects agreement. That is what
+Phase 8 makes possible.
+
+``test_a_portal_that_provisions_the_wrong_tier_is_caught`` forces the divergence
+D8 exists for: every step reports success, the portal provisioned something
+else, and validation must fail anyway. A system that only ever agrees with
+itself has not been shown to detect anything.
 
 Infrastructure-dependent; pending until PostgreSQL with pgvector is available.
 """
@@ -38,6 +42,7 @@ from custops.domain.seed import seed_all, seed_id
 from custops.knowledge.ingestion.pipeline import ingest_contracts, ingest_policies
 from custops.providers.chat import DeterministicChatProvider
 from custops.providers.deterministic import DeterministicEmbeddingProvider
+from custops.provisioning.client import StubProvisioningClient
 from tests.integration.conftest import requires_postgres
 
 pytestmark = [pytest.mark.integration, requires_postgres]
@@ -89,13 +94,42 @@ async def seeded(database: Database) -> AsyncIterator[Database]:
             await session.commit()
 
 
-def _deps(database: Database, chat: DeterministicChatProvider | None = None) -> NodeDependencies:
+def _deps(
+    database: Database,
+    chat: DeterministicChatProvider | None = None,
+    provisioning: StubProvisioningClient | None = None,
+) -> NodeDependencies:
     return NodeDependencies(
         session_factory=database.session_factory,
         chat=chat or _chat(),
         embedder=EMBEDDER,
+        provisioning=provisioning,
         clock=lambda: NOW,
     )
+
+
+async def _grant_upgrade_approval(database: Database, state: dict[str, Any]) -> None:
+    """Record the single approval the execute step verifies against.
+
+    One row, scoped to the account — the same shape the approval gate creates,
+    and what every mutation in the workflow checks. Granting per-tool approvals
+    here would test a scheme the system does not use.
+    """
+    async with database.session_factory() as session:
+        session.add(
+            Approval(
+                id=uuid.uuid4(),
+                execution_id=state["execution_id"],
+                action="subscription_upgrade",
+                entity_type="account",
+                entity_id=str(state["account_id"]),
+                status=ApprovalStatus.APPROVED,
+                reason="Granted for test.",
+                evidence={},
+                decided_at=datetime.now(UTC),
+            )
+        )
+        await session.commit()
 
 
 def _state(customer_ref: str = "ACME", plan: str = "enterprise") -> dict[str, Any]:
@@ -214,12 +248,17 @@ class TestExecuteAndValidate:
         assert any(not r["ok"] for r in update["execution_results"])
         assert any(e["code"] == "approval_required" for e in update["errors"])
 
-    async def test_a_successful_execution_still_fails_validation(self, seeded: Database) -> None:
+    async def test_execution_without_provisioning_fails_validation(self, seeded: Database) -> None:
         """The D8 divergence, detected.
 
-        Billing and the CRM both accept the change. Nothing flips the
-        entitlement — that is Phase 8's Playwright step — so validation must
-        refuse to pass rather than declare success from two agreeing systems.
+        With no provisioning client configured, billing and the CRM accept the
+        change and nothing provisions the entitlement. Validation must refuse to
+        pass rather than declare success from two agreeing systems.
+
+        Phase 8 added the provisioning step, so this is now the *unconfigured*
+        path rather than the only path — see
+        ``test_a_fully_provisioned_execution_passes_validation`` for the full
+        Billing → CRM → Portal → validation chain.
         """
         nodes = build_nodes(_deps(seeded))
         state = _state()
@@ -269,8 +308,73 @@ class TestExecuteAndValidate:
 
         assert billing["verdict"] == ValidationVerdict.PASS
         assert crm["verdict"] == ValidationVerdict.PASS
-        assert entitlement["verdict"] == ValidationVerdict.FAIL
-        assert entitlement["actual"] == "professional"
+        # Not consulted, because no provisioning client was configured — which
+        # is reported as needing review rather than as agreement.
+        assert entitlement["verdict"] == ValidationVerdict.NEEDS_REVIEW
+
+    async def test_a_fully_provisioned_execution_passes_validation(self, seeded: Database) -> None:
+        """Billing → CRM → Legacy Portal → validation, all agreeing.
+
+        The point of Phase 8: an upgrade that genuinely provisions no longer
+        fails merely because provisioning was missing.
+        """
+        provisioning = StubProvisioningClient()
+        nodes = build_nodes(_deps(seeded, provisioning=provisioning))
+        state = _state()
+        state.update(await nodes.supervisor(state))  # type: ignore[arg-type]
+        state.update(await nodes.research(state))  # type: ignore[arg-type]
+        state.update(await nodes.decide(state))  # type: ignore[arg-type]
+
+        await _grant_upgrade_approval(seeded, state)
+
+        execution = await nodes.execute(state)  # type: ignore[arg-type]
+        state.update(execution)
+        validation = await nodes.validate(state)  # type: ignore[arg-type]
+
+        assert all(r["ok"] for r in execution["execution_results"]), execution["errors"]
+        assert overall_verdict(validation["validation_results"]) == ValidationVerdict.PASS
+        assert any(call["op"] == "set_tier" for call in provisioning.calls)
+
+    async def test_a_portal_that_provisions_the_wrong_tier_is_caught(
+        self, seeded: Database
+    ) -> None:
+        """§11 asks for a test that forces exactly this divergence.
+
+        Every step reports success and the portal provisioned something else.
+        Validation must fail.
+        """
+        provisioning = StubProvisioningClient(drift_to="starter")
+        nodes = build_nodes(_deps(seeded, provisioning=provisioning))
+        state = _state()
+        state.update(await nodes.supervisor(state))  # type: ignore[arg-type]
+        state.update(await nodes.research(state))  # type: ignore[arg-type]
+        state.update(await nodes.decide(state))  # type: ignore[arg-type]
+
+        await _grant_upgrade_approval(seeded, state)
+
+        state.update(await nodes.execute(state))  # type: ignore[arg-type]
+        validation = await nodes.validate(state)  # type: ignore[arg-type]
+
+        results = validation["validation_results"]
+        entitlement = next(r for r in results if r["check"] == "entitlement_tier")
+
+        assert overall_verdict(results) == ValidationVerdict.FAIL
+        assert entitlement["actual"] == "starter"
+
+    async def test_the_provisioning_step_requires_the_same_approval(self, seeded: Database) -> None:
+        """D9 holds for the browser step too — no approval, no provisioning."""
+        provisioning = StubProvisioningClient()
+        nodes = build_nodes(_deps(seeded, provisioning=provisioning))
+        state = _state()
+        state.update(await nodes.supervisor(state))  # type: ignore[arg-type]
+        state.update(await nodes.research(state))  # type: ignore[arg-type]
+        state.update(await nodes.decide(state))  # type: ignore[arg-type]
+
+        # No approval granted.
+        execution = await nodes.execute(state)  # type: ignore[arg-type]
+
+        assert any(e["code"] == "approval_required" for e in execution["errors"])
+        assert not provisioning.calls, "the portal was driven without an approval"
 
     async def test_the_divergence_is_recorded_as_non_retryable(self, seeded: Database) -> None:
         """Retrying cannot make two systems agree; only provisioning can."""

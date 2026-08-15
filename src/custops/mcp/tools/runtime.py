@@ -83,12 +83,25 @@ async def execute_tool(
     handler: Handler,
     *,
     approval_entity: tuple[str, str] | None = None,
+    approval_action: str | None = None,
+    consume_approval: bool = True,
 ) -> ToolResult[Any]:
     """Run one tool call through permission, approval, execution and audit.
 
     ``approval_entity`` is the (entity_type, entity_id) the mutation targets. A
     mutating tool that does not supply it is refused rather than defaulted: an
     approval that isn't scoped to a specific entity authorises every entity.
+
+    ``approval_action`` overrides the action name this call verifies against.
+    One workflow performs several mutations under a single human decision — a
+    person approves *the upgrade*, not three technical steps — so each tool in
+    that workflow verifies the same approval rather than requiring its own.
+
+    ``consume_approval`` controls whether this call spends it. When several
+    tools share one approval, only the last should consume; spending it on the
+    first would leave the rest unauthorised mid-workflow, with billing changed
+    and provisioning refused. The caller is responsible for consuming exactly
+    once — verification still happens on every call, which is what D9 requires.
     """
     started = time.perf_counter()
     started_at = datetime.now(UTC)
@@ -97,7 +110,14 @@ async def execute_tool(
         policy = check_permission(context.role, tool)
         async with context.session.begin_nested():
             outcome = await _authorise_and_run(
-                context, tool, policy, arguments, handler, approval_entity
+                context,
+                tool,
+                policy,
+                arguments,
+                handler,
+                approval_entity,
+                approval_action=approval_action,
+                consume_approval=consume_approval,
             )
 
     except PermissionDeniedError as error:
@@ -162,6 +182,9 @@ async def _authorise_and_run(
     arguments: BaseModel,
     handler: Handler,
     approval_entity: tuple[str, str] | None,
+    *,
+    approval_action: str | None = None,
+    consume_approval: bool = True,
 ) -> _Outcome:
     """Verify approval where required, then run the handler."""
     approval_id: uuid.UUID | None = None
@@ -183,10 +206,11 @@ async def _authorise_and_run(
             context.session,
             ApprovalRequirement(
                 execution_id=context.execution_id,
-                action=policy.approval_action or tool,
+                action=approval_action or policy.approval_action or tool,
                 entity_type=approval_entity[0],
                 entity_id=approval_entity[1],
             ),
+            consume=consume_approval,
         )
         approval_id = approval.id
 

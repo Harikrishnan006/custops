@@ -50,7 +50,6 @@ from custops.apps.enterprise.crm import service as crm_service
 from custops.apps.orchestrator.graph import NodeSet
 from custops.domain.models.approval import Approval, ApprovalStatus
 from custops.domain.models.billing import Subscription
-from custops.domain.models.entitlement import Entitlement
 from custops.domain.policies.thresholds import ApprovalPolicy
 from custops.mcp.permissions.matrix import Role, ToolName
 from custops.mcp.tools import enterprise as handlers
@@ -61,11 +60,13 @@ from custops.mcp.tools.schemas import (
     GetSupportHistoryInput,
     SearchKnowledgeInput,
     UpdateCrmInput,
+    UpdateEntitlementInput,
     UpdateSubscriptionInput,
 )
 from custops.observability.logging import get_logger
 from custops.providers.base import EmbeddingProvider
 from custops.providers.chat import ChatProvider
+from custops.provisioning.client import ProvisioningClient
 
 logger = get_logger(__name__)
 
@@ -96,6 +97,10 @@ class NodeDependencies:
     session_factory: async_sessionmaker[AsyncSession]
     chat: ChatProvider
     embedder: EmbeddingProvider
+    # Drives the legacy portal (§11). Optional so a run can be assembled without
+    # a browser; the execute step then fails honestly rather than skipping
+    # provisioning and letting validation call the result a success.
+    provisioning: ProvisioningClient | None = None
     approval_policy: ApprovalPolicy | None = None
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
 
@@ -514,10 +519,17 @@ def build_nodes(deps: NodeDependencies) -> NodeSet:
     async def execute(state: WorkflowState) -> dict[str, Any]:
         """Apply the change through permission-checked, approval-gated tools.
 
-        Note what is *absent*: nothing here flips the entitlement in the legacy
-        provisioning portal. That is Phase 8's Playwright step, and until it
-        exists the Validator is expected to detect the divergence rather than
-        the workflow pretending success (D8).
+        Three mutations in order — billing, CRM, then the legacy portal — all
+        under **one** human approval. A person approves *the upgrade*, not three
+        technical steps, so each tool verifies the same approval record and only
+        the last consumes it. Spending it on the first would leave billing
+        changed and provisioning refused: precisely the divergence §14 exists to
+        catch, manufactured by the enforcement itself.
+
+        Provisioning is last because it is the slowest and least reversible: a
+        browser session that fails after billing and the CRM have been updated
+        leaves a divergence the Validator will catch, whereas a portal flip
+        followed by a failed billing update leaves one nothing points at.
         """
         account_id = state.get("account_id")
         target = state.get("target_plan_code")
@@ -540,12 +552,19 @@ def build_nodes(deps: NodeDependencies) -> NodeSet:
                 await session.rollback()
                 return _escalate_update(f"Account {account_id} has no subscription.")
 
+            # The single authorisation every mutation in this workflow verifies
+            # against, matching what the approval gate recorded.
+            approval_scope = ("account", str(account_id))
+            approval_action = "subscription_upgrade"
+
             plan_change = await execute_tool(
                 context,
                 ToolName.UPDATE_SUBSCRIPTION,
                 UpdateSubscriptionInput(subscription_id=subscription_id, target_plan_code=target),
                 handlers.update_subscription,
-                approval_entity=("subscription", str(subscription_id)),
+                approval_entity=approval_scope,
+                approval_action=approval_action,
+                consume_approval=False,
             )
             results.append(_execution_result("update_subscription", plan_change))
             if plan_change.error is not None:
@@ -556,11 +575,69 @@ def build_nodes(deps: NodeDependencies) -> NodeSet:
                 ToolName.UPDATE_CRM,
                 UpdateCrmInput(account_id=account_id, plan_code=target),
                 handlers.update_crm,
-                approval_entity=("account", str(account_id)),
+                approval_entity=approval_scope,
+                approval_action=approval_action,
+                consume_approval=False,
             )
             results.append(_execution_result("update_crm", crm_sync))
             if crm_sync.error is not None:
                 errors.append(_error("execute", crm_sync.error))
+
+            # --- Provisioning: the browser step (§11, D8) -------------------
+            if deps.provisioning is None:
+                # Recorded as a failure rather than skipped: an unprovisioned
+                # upgrade that reports success is the exact outcome this
+                # architecture exists to prevent.
+                results.append(
+                    {
+                        "step": "update_entitlement",
+                        "tool": ToolName.UPDATE_ENTITLEMENT,
+                        "ok": False,
+                        "error_code": ToolErrorCode.PRECONDITION_FAILED,
+                        "detail": {"reason": "No provisioning client is configured."},
+                    }
+                )
+                errors.append(
+                    {
+                        "stage": "execute",
+                        "code": ToolErrorCode.PRECONDITION_FAILED,
+                        "message": "Entitlement provisioning is not configured.",
+                        "retryable": False,
+                    }
+                )
+            else:
+                seats = (
+                    await session.execute(
+                        select(Subscription.seats).where(Subscription.id == subscription_id)
+                    )
+                ).scalar_one_or_none() or 1
+
+                provisioned = await execute_tool(
+                    context,
+                    ToolName.UPDATE_ENTITLEMENT,
+                    UpdateEntitlementInput(account_id=account_id, tier=target, seats=int(seats)),
+                    handlers.make_update_entitlement(deps.provisioning),
+                    approval_entity=approval_scope,
+                    approval_action=approval_action,
+                    # Last mutation: this one spends the approval.
+                    consume_approval=True,
+                )
+                results.append(_execution_result("update_entitlement", provisioned))
+                if provisioned.error is not None:
+                    errors.append(_error("execute", provisioned.error))
+                elif provisioned.data is not None and not provisioned.data.matches_request:
+                    # The form submitted and the portal confirmed something else.
+                    errors.append(
+                        {
+                            "stage": "execute",
+                            "code": ToolErrorCode.PRECONDITION_FAILED,
+                            "message": (
+                                f"Portal confirmed '{provisioned.data.confirmed_tier}' "
+                                f"but '{target}' was requested."
+                            ),
+                            "retryable": False,
+                        }
+                    )
 
             await session.commit()
 
@@ -595,17 +672,28 @@ def build_nodes(deps: NodeDependencies) -> NodeSet:
                 handlers.get_subscription,
             )
             account = await crm_service.get_account(session, account_id)
-            entitlement = (
-                await session.execute(
-                    select(Entitlement).where(Entitlement.account_id == account_id)
+
+            # Read the entitlement from the **portal**, not from our mirror of
+            # it. Querying the entitlements table would check our own side of
+            # the integration, and a validator that validates itself proves
+            # nothing (§14). None means the portal could not be consulted, which
+            # the comparison reports as needing review rather than as agreement.
+            entitlement_tier: str | None = None
+            if deps.provisioning is not None:
+                portal_read = await execute_tool(
+                    context,
+                    ToolName.GET_ENTITLEMENT,
+                    AccountInput(account_id=account_id),
+                    handlers.make_get_entitlement(deps.provisioning),
                 )
-            ).scalar_one_or_none()
+                if portal_read.ok and portal_read.data is not None:
+                    entitlement_tier = portal_read.data.tier
 
             observed = ObservedState(
                 billing_plan_code=billing.data.plan_code if billing.ok and billing.data else None,
                 billing_status=billing.data.status if billing.ok and billing.data else None,
                 crm_plan_code=account.current_plan_code if account else None,
-                entitlement_tier=entitlement.tier if entitlement else None,
+                entitlement_tier=entitlement_tier,
             )
             await session.commit()
 
