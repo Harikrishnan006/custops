@@ -19,6 +19,7 @@ from fastapi import FastAPI
 
 from custops.apps.api.middleware.request_context import RequestContextMiddleware
 from custops.apps.api.routers import health
+from custops.apps.enterprise.router import router as enterprise_router
 from custops.cache.redis_client import create_redis_client
 from custops.config import Settings, get_settings
 from custops.db.engine import create_database
@@ -74,6 +75,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = resolved
     app.add_middleware(RequestContextMiddleware)
     app.include_router(health.router)
+    # Read-only views onto the systems of record. Mutations are not routed here
+    # — they travel through the MCP tool layer, which enforces approval (D9).
+    app.include_router(enterprise_router)
     return app
 
 

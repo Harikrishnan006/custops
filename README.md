@@ -15,14 +15,18 @@ not text.
 - **Full specification:** [docs/BUILD_SPEC.md](docs/BUILD_SPEC.md)
 - **Decisions:** [docs/decisions/](docs/decisions/)
 
-> ### Current status: Phase 1 of 14 complete
+> ### Current status: Phases 1–2 of 14 complete
 >
-> Phase 1 is **foundation only**: configuration, structured logging, database,
-> migrations, health checking, tests. There are no agents, no LangGraph, no MCP
-> tools and no workflows yet — they arrive in their own phases and are
-> deliberately absent rather than stubbed. See
-> [docs/PHASE-01-COMPLETION.md](docs/PHASE-01-COMPLETION.md) for exactly what is
-> built, what is verified, and what is not.
+> **Phase 1** — foundation: configuration, structured logging, database,
+> migrations, health checking.
+> **Phase 2** — domain model, deterministic business rules (pricing, eligibility,
+> approval thresholds), the enterprise systems of record, and seed data.
+>
+> There are no agents, no LangGraph, no MCP tools and no workflows yet — they
+> arrive in their own phases and are deliberately absent rather than stubbed.
+> Per-phase reports, including what is verified and what is not, are in
+> [docs/PHASE-01-COMPLETION.md](docs/PHASE-01-COMPLETION.md) and
+> [docs/PHASE-02-COMPLETION.md](docs/PHASE-02-COMPLETION.md).
 
 ---
 
@@ -127,6 +131,13 @@ uv sync
 uv run alembic upgrade head
 ```
 
+Load the synthetic catalogue (seven accounts, each exercising a different
+eligibility path — see [seed.py](src/custops/domain/seed.py)):
+
+```bash
+uv run custops seed
+```
+
 ```bash
 uv run uvicorn custops.apps.api.main:app --reload
 ```
@@ -164,6 +175,30 @@ why. The API starts and answers even when both dependencies are down — a servi
 that refuses to boot cannot tell you what is wrong with it.
 
 Interactive API docs: <http://localhost:8000/docs>
+
+### Inspecting the systems of record
+
+Read-only views onto the seeded data. Useful for seeing the deterministic layer
+work before any agent exists:
+
+```bash
+curl "http://localhost:8000/enterprise/customers/ACME"
+```
+
+The verdict on a proposed upgrade — eligibility, proration and whether a human
+must approve, with a source reference for every fact:
+
+```bash
+curl "http://localhost:8000/enterprise/accounts/<account_id>/upgrade-assessment?target_plan_code=enterprise"
+```
+
+Try it against the seeded accounts to see each branch: `ACME` proceeds
+automatically, `GLOBEX` is blocked by its contract, `UMBRELLA` needs approval for
+its 35% discount, `VEHEMENT` escalates on ambiguous contract wording.
+
+Every enterprise route is a `GET`. Mutations are deliberately not exposed over
+HTTP — they travel through the MCP tool layer, which verifies an approval record
+before acting.
 
 ---
 

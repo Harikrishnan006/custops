@@ -23,6 +23,9 @@ dependencies = [
     "structlog>=24.4",
 ]
 
+[project.scripts]
+custops = "custops.cli:main"
+
 [dependency-groups]
 dev = [
     "pytest>=8.3",
