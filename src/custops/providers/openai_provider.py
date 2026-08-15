@@ -8,7 +8,7 @@ deep.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from custops.providers.base import (
     EmbeddingResult,
@@ -16,9 +16,6 @@ from custops.providers.base import (
     ProviderName,
     ProviderNotConfiguredError,
 )
-
-if TYPE_CHECKING:  # pragma: no cover - typing only
-    pass
 
 # text-embedding-3-small: 1536 dimensions, the cost/quality default.
 # text-embedding-3-large is 3072 — changing model changes the stored column
