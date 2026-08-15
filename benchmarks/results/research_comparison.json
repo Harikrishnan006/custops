@@ -1,0 +1,106 @@
+{
+  "environment": {
+    "python": "3.11.9",
+    "platform": "Windows-10-10.0.26200-SP0",
+    "repetitions": 5,
+    "inputs": 5
+  },
+  "reference_ms": {
+    "ideal_parallel": 140.0,
+    "ideal_serial": 420.0
+  },
+  "scenarios": {
+    "healthy": {
+      "langgraph": {
+        "runs": 25,
+        "latency_ms": {
+          "p50": 145.77,
+          "p95": 158.58,
+          "mean": 143.87,
+          "min": 115.65,
+          "max": 163.08
+        },
+        "completeness_mean": 1.0,
+        "completeness_min": 1.0,
+        "model_calls": 25,
+        "model_calls_per_run": 1.0,
+        "chars_in": 7725,
+        "chars_out": 3075,
+        "tokens_in": 1931,
+        "tokens_out": 768,
+        "estimated_cost_usd": 0.017313,
+        "estimated_cost_per_run_usd": 0.000693,
+        "runs_with_errors": 0,
+        "runs_disagreeing_with_truth": 0
+      },
+      "crewai": {
+        "runs": 25,
+        "latency_ms": {
+          "p50": 225.82,
+          "p95": 304.77,
+          "mean": 237.11,
+          "min": 202.45,
+          "max": 343.24
+        },
+        "completeness_mean": 1.0,
+        "completeness_min": 1.0,
+        "model_calls": 275,
+        "model_calls_per_run": 11.0,
+        "chars_in": 427425,
+        "chars_out": 38475,
+        "tokens_in": 106856,
+        "tokens_out": 9618,
+        "estimated_cost_usd": 0.464838,
+        "estimated_cost_per_run_usd": 0.018594,
+        "runs_with_errors": 0,
+        "runs_disagreeing_with_truth": 0
+      }
+    },
+    "degraded_policy": {
+      "langgraph": {
+        "runs": 25,
+        "latency_ms": {
+          "p50": 95.44,
+          "p95": 106.96,
+          "mean": 95.04,
+          "min": 82.7,
+          "max": 111.04
+        },
+        "completeness_mean": 1.0,
+        "completeness_min": 1.0,
+        "model_calls": 25,
+        "model_calls_per_run": 1.0,
+        "chars_in": 6340,
+        "chars_out": 3075,
+        "tokens_in": 1585,
+        "tokens_out": 768,
+        "estimated_cost_usd": 0.016275,
+        "estimated_cost_per_run_usd": 0.000651,
+        "runs_with_errors": 25,
+        "runs_disagreeing_with_truth": 0
+      },
+      "crewai": {
+        "runs": 25,
+        "latency_ms": {
+          "p50": 187.52,
+          "p95": 202.84,
+          "mean": 191.33,
+          "min": 169.69,
+          "max": 277.57
+        },
+        "completeness_mean": 1.0,
+        "completeness_min": 1.0,
+        "model_calls": 275,
+        "model_calls_per_run": 11.0,
+        "chars_in": 427465,
+        "chars_out": 38475,
+        "tokens_in": 106866,
+        "tokens_out": 9618,
+        "estimated_cost_usd": 0.464868,
+        "estimated_cost_per_run_usd": 0.018595,
+        "runs_with_errors": 25,
+        "runs_disagreeing_with_truth": 0
+      }
+    }
+  }
+}

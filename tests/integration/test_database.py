@@ -11,7 +11,11 @@ do not.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import text
 
 from custops.db.engine import Database, probe_postgres
@@ -20,7 +24,26 @@ from tests.integration.conftest import requires_postgres
 pytestmark = [pytest.mark.integration, requires_postgres]
 
 EXPECTED_TABLES = {"users", "roles", "user_roles", "audit_events", "alembic_version"}
-HEAD_REVISION = "0002_foundation_tables"
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def alembic_heads() -> list[str]:
+    """Ask Alembic what the head revision is, rather than restating it here.
+
+    This assertion used to hardcode ``0002_foundation_tables``, which went stale
+    the moment migration 0003 landed and stayed wrong through 0006 — a test that
+    could only fail for the wrong reason, and only on a machine that could reach
+    PostgreSQL. Deriving it means adding a migration can never leave a false
+    expectation behind.
+
+    Returns every head. That the history has exactly one is asserted without a
+    database in ``tests/unit/test_migration_schema_consistency.py``, so a branch
+    is caught on any machine rather than only where PostgreSQL is reachable.
+    """
+    config = Config(str(_PROJECT_ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(_PROJECT_ROOT / "migrations"))
+    return list(ScriptDirectory.from_config(config).get_heads())
 
 
 async def test_database_accepts_a_connection(database: Database) -> None:
@@ -69,9 +92,7 @@ async def test_schema_is_at_head_revision(database: Database) -> None:
             await connection.execute(text("SELECT version_num FROM alembic_version"))
         ).scalars()
 
-    # Exactly one row: multiple heads mean a branched migration history, which
-    # silently applies only part of the schema.
-    assert list(revisions) == [HEAD_REVISION]
+    assert list(revisions) == alembic_heads()
 
 
 async def test_audit_events_defaults_are_server_side(database: Database) -> None:
