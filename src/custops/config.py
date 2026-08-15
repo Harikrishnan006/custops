@@ -70,6 +70,20 @@ class PostgresSettings(BaseSettings):
         user = quote(self.user, safe="")
         return f"postgresql+{driver}://{user}:{password}@{self.host}:{self.port}/{self.db}"
 
+    def libpq_dsn(self, *, reveal_password: bool = True) -> str:
+        """Build a driver-less URL for libpq clients.
+
+        SQLAlchemy URLs carry a ``+driver`` suffix; libpq does not understand
+        one. The LangGraph Postgres checkpointer speaks psycopg 3 directly, so
+        it needs this form. Kept as an explicit method rather than letting
+        callers strip the suffix from ``dsn()``, because that string surgery
+        would silently produce an invalid URL the moment the driver name
+        changes.
+        """
+        password = quote(self.password.get_secret_value(), safe="") if reveal_password else _MASK
+        user = quote(self.user, safe="")
+        return f"postgresql://{user}:{password}@{self.host}:{self.port}/{self.db}"
+
     @computed_field  # type: ignore[prop-decorator]
     @property
     def safe_dsn(self) -> str:

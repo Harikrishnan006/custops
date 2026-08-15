@@ -1,8 +1,59 @@
 # ADR-003: What is Redis actually for?
 
-- **Status:** 🟡 **Proposed / open** — resolve in Phase 5
+- **Status:** ✅ **Accepted** — decided in Phase 5
 - **Date raised:** 2026-08-15
-- **Phase:** 1 (raised), 5 (to be decided)
+- **Date decided:** 2026-08-15
+- **Phase:** 1 (raised), 5 (decided)
+
+## Decision
+
+**Checkpoints live in PostgreSQL. Redis keeps no job yet, and is retained only
+as the liveness dependency Phase 1's definition of done requires.**
+
+`apps/orchestrator/checkpointer.py` uses LangGraph's `AsyncPostgresSaver`,
+against the same database as everything else. The reasoning in the Context
+section below held up once the checkpointer was actually wired: a workflow
+paused at an approval gate is business state, and §7 requires it to survive a
+process restart.
+
+Two implementation facts emerged from wiring it, both worth recording because
+neither was predictable from the spec:
+
+1. **The checkpointer speaks psycopg 3, not asyncpg.** The rest of the
+   application reaches PostgreSQL through SQLAlchemy + asyncpg. Two drivers
+   against one database is a real cost, accepted because the alternative is
+   writing a checkpointer by hand. `psycopg[binary]` ships prebuilt wheels, so
+   this adds no build toolchain requirement.
+2. **`AsyncPostgresSaver` owns its own tables** via internal migrations and
+   `setup()`. They are deliberately absent from our Alembic history: they are
+   the library's schema, versioned with the library, and duplicating them into
+   our migrations would guarantee drift on the first upgrade.
+
+## What this means for Redis
+
+Redis still holds nothing. No code writes to it. Of the four candidate jobs
+listed below, none has yet become real work:
+
+- The **embedding cache** remains the strongest candidate, but Phase 3's
+  ingestion is already content-addressed — unchanged documents are skipped
+  without re-embedding — so the expensive repetition it would have prevented
+  does not currently happen.
+- **Tool idempotency keys** were considered and rejected in Phase 4 for the
+  reason anticipated below: an idempotency record that can be evicted is an
+  idempotency guarantee that can lapse. Phase 4 instead makes approvals
+  single-use in PostgreSQL (`approvals.consumed_at`), which is durable.
+- The **A2A response cache** is still weak and still Phase 9's to assess.
+
+**The decision criterion stands: whatever Redis ends up doing must be
+demonstrable by a test that fails if Redis is removed.** No such test exists
+today. Option 4 — delete the dependency — is therefore live, and should be
+taken at Phase 13 if nothing has claimed it by then. Retaining an idle service
+because a spec listed it is exactly the answer §23 says would not survive
+questioning.
+
+---
+
+## Original context (retained)
 
 ## Context
 
