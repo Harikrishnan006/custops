@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from custops.apps.api.middleware.request_context import RequestContextMiddleware
-from custops.apps.api.routers import health
+from custops.apps.api.routers import health, workflows
 from custops.apps.enterprise.router import router as enterprise_router
 from custops.cache.redis_client import create_redis_client
 from custops.config import Settings, get_settings
@@ -78,6 +78,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Read-only views onto the systems of record. Mutations are not routed here
     # — they travel through the MCP tool layer, which enforces approval (D9).
     app.include_router(enterprise_router)
+    # Workflow start and trace reconstruction. The approval-decision route is
+    # Phase 7; a paused run reports itself and waits.
+    app.include_router(workflows.router)
     return app
 
 

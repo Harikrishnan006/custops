@@ -17,6 +17,7 @@ from custops.domain.models.entitlement import Entitlement
 from custops.domain.models.identity import Role, User, UserRole
 from custops.domain.models.knowledge import KnowledgeChunk, KnowledgeDocument
 from custops.domain.models.support import Conversation, SupportTicket
+from custops.domain.models.workflow import WorkflowExecution, WorkflowStep
 
 __all__ = [
     "Account",
@@ -40,4 +41,6 @@ __all__ = [
     "ToolCall",
     "User",
     "UserRole",
+    "WorkflowExecution",
+    "WorkflowStep",
 ]
