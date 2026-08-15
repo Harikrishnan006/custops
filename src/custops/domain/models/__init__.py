@@ -8,6 +8,7 @@ invisible to migrations — which fails silently, in the worst possible directio
 
 from __future__ import annotations
 
+from custops.domain.models.approval import Approval, ToolCall
 from custops.domain.models.audit import AuditEvent
 from custops.domain.models.billing import Discount, Invoice, Payment, Plan, Subscription
 from custops.domain.models.contract import Contract, Policy
@@ -19,6 +20,7 @@ from custops.domain.models.support import Conversation, SupportTicket
 
 __all__ = [
     "Account",
+    "Approval",
     "AuditEvent",
     "Contact",
     "Contract",
@@ -35,6 +37,7 @@ __all__ = [
     "Role",
     "Subscription",
     "SupportTicket",
+    "ToolCall",
     "User",
     "UserRole",
 ]
