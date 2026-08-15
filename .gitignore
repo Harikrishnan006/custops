@@ -1,0 +1,30 @@
+# Secrets — .env is NEVER committed (BUILD_SPEC §17, Rule 16)
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editors / OS
+.idea/
+.vscode/
+Thumbs.db
+desktop.ini
+
+# Local data volumes (Docker named volumes live outside the repo, but keep
+# this here in case anyone bind-mounts pgdata during local experimentation)
+pgdata/
+
+# uv.lock IS committed — reproducible builds are the point of the lockfile.

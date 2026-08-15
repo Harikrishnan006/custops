@@ -1,0 +1,80 @@
+# ---------------------------------------------------------------------------
+# Exactly three services: api, postgres, redis (Phase 1 definition of done #1).
+#
+# There is no separate vector-database service: pgvector is an extension of this
+# PostgreSQL instance (decision D4). There is no Celery worker or broker
+# (decision D2). Nothing is added here without a job (Rules 7 and 8).
+#
+# ⚠ NOT YET VERIFIED. Docker was not available in the environment where Phase 1
+# was built, so this file has never been executed. Image tags were checked
+# against the registries, but the composition itself is unproven — treat the
+# first `docker compose up` as a Phase 1 completion task, not a formality.
+# See docs/PHASE-01-COMPLETION.md, "Unverified".
+# ---------------------------------------------------------------------------
+
+name: custops
+
+services:
+  postgres:
+    # pgvector's official image = PostgreSQL 17 with the extension pre-installed,
+    # so migration 0001 can run CREATE EXTENSION without a build step.
+    image: pgvector/pgvector:0.8.6-pg17
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-custops}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-custops}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # depends_on: service_healthy is only meaningful if this actually tests
+      # readiness to accept queries, not merely that the container is running.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-custops} -d ${POSTGRES_DB:-custops}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:8.10
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  api:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/api.Dockerfile
+    env_file:
+      - .env
+    environment:
+      # Override the localhost defaults from .env: inside the compose network
+      # the dependencies answer to their service names.
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # urlopen raises on 503, which is the intended semantics: the API is not
+      # healthy while a dependency it needs is unreachable.
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://localhost:8000/health")
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+volumes:
+  pgdata:
