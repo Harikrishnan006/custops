@@ -46,7 +46,9 @@ from custops.domain.models.contract import Contract, Policy
 from custops.domain.models.customer import Account, Contact, Customer
 from custops.domain.models.entitlement import Entitlement
 from custops.domain.models.identity import Role, User, UserRole
+from custops.domain.models.knowledge import KnowledgeDocument
 from custops.domain.models.support import Conversation, SupportTicket
+from custops.knowledge.retrieval.evidence import EvidenceSource
 
 # Fixed namespace: changing this regenerates every id in the seed set.
 SEED_NAMESPACE = uuid.UUID("6f0c9b3e-1f3a-5c7d-9e2b-4a8d6c0f1e35")
@@ -677,15 +679,44 @@ _TICKET_BODIES = (
 
 
 async def clear_seed_data(session: AsyncSession) -> None:
-    """Remove seeded customers and their cascade.
+    """Remove seeded data and anything ingested from it.
 
     Used by integration tests that need a known-empty starting point. Deletes by
-    the deterministic ids only, so it cannot remove data it did not create.
+    the deterministic ids and by the source references this module creates, so
+    it cannot remove data it did not create.
+
+    **Policies and their knowledge documents are cleared too.** They are global
+    rather than customer-scoped, so deleting customers leaves them behind — and
+    because ingestion is correctly a no-op on unchanged content, a later test
+    calling ``ingest_policies`` then saw ``chunks_written == 0`` and failed. The
+    knowledge suite was silently order-dependent on whichever suite had
+    committed an ingest first. CI found it the first time these ran together.
     """
     for scenario in SCENARIOS:
         customer = await session.get(Customer, seed_id("customer", str(scenario["key"])))
         if customer is not None:
             await session.delete(customer)
+
+    # Documents ingested from the seeded policies. Matched on the same
+    # source_ref ingestion builds, so nothing else is touched.
+    policy_refs = [f"{data['code']}:v1" for data in POLICIES]
+    if policy_refs:
+        documents = (
+            await session.execute(
+                select(KnowledgeDocument).where(
+                    KnowledgeDocument.source_type == EvidenceSource.POLICY,
+                    KnowledgeDocument.source_ref.in_(policy_refs),
+                )
+            )
+        ).scalars()
+        for document in documents:
+            await session.delete(document)
+
+    for policy_data in POLICIES:
+        policy = await session.get(Policy, seed_id("policy", str(policy_data["code"])))
+        if policy is not None:
+            await session.delete(policy)
+
     await session.flush()
 
 

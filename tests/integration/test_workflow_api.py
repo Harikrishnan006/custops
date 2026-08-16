@@ -263,7 +263,11 @@ class TestApprovalPause:
 
         async with (
             app.router.lifespan_context(app),
-            AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client,
+            AsyncClient(
+                transport=ASGITransport(app=app),
+                base_url="http://testserver",
+                headers=bearer(await issue_test_token(seeded, email=OPERATOR_EMAIL)),
+            ) as client,
         ):
             response = await client.post(
                 "/workflows", json={"request": "Upgrade Umbrella to Enterprise."}
@@ -286,7 +290,11 @@ class TestApprovalPause:
 
         async with (
             app.router.lifespan_context(app),
-            AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client,
+            AsyncClient(
+                transport=ASGITransport(app=app),
+                base_url="http://testserver",
+                headers=bearer(await issue_test_token(seeded, email=OPERATOR_EMAIL)),
+            ) as client,
         ):
             started = (
                 await client.post("/workflows", json={"request": "Upgrade Umbrella to Enterprise."})
@@ -310,7 +318,11 @@ class TestEscalation:
 
         async with (
             app.router.lifespan_context(app),
-            AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client,
+            AsyncClient(
+                transport=ASGITransport(app=app),
+                base_url="http://testserver",
+                headers=bearer(await issue_test_token(seeded, email=OPERATOR_EMAIL)),
+            ) as client,
         ):
             started = (
                 await client.post("/workflows", json={"request": "Upgrade Globex to Enterprise."})

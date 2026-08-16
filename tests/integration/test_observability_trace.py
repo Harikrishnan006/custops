@@ -205,7 +205,7 @@ class TestTheInspectionEndpoint:
         assert isinstance(operator_client, AsyncClient)
 
         started = await operator_client.post(
-            "/workflows", json={"raw_request": "Upgrade ACME to enterprise."}
+            "/workflows", json={"request": "Upgrade ACME to enterprise."}
         )
         assert started.status_code in (200, 201, 202), started.text
         execution_id = started.json()["execution_id"]
@@ -226,7 +226,7 @@ class TestTheInspectionEndpoint:
         assert isinstance(operator_client, AsyncClient)
 
         started = await operator_client.post(
-            "/workflows", json={"raw_request": "Upgrade ACME to enterprise."}
+            "/workflows", json={"request": "Upgrade ACME to enterprise."}
         )
         execution_id = started.json()["execution_id"]
 
@@ -249,7 +249,7 @@ class TestTheInspectionEndpoint:
         assert isinstance(operator_client, AsyncClient)
 
         started = await operator_client.post(
-            "/workflows", json={"raw_request": "Upgrade ACME to enterprise."}
+            "/workflows", json={"request": "Upgrade ACME to enterprise."}
         )
         execution_id = started.json()["execution_id"]
 

@@ -42,7 +42,12 @@ class Customer(Base, TimestampMixin):
     )
 
     accounts: Mapped[list[Account]] = relationship(
-        back_populates="customer", cascade="all, delete-orphan"
+        back_populates="customer",
+        cascade="all, delete-orphan",
+        # The FK already declares ON DELETE CASCADE. Without this the ORM loads
+        # every child and de-associates it by writing NULL into a NOT NULL
+        # column — see the note on Account's collections below.
+        passive_deletes=True,
     )
 
     def __repr__(self) -> str:
@@ -86,15 +91,43 @@ class Account(Base, TimestampMixin):
     )
 
     customer: Mapped[Customer] = relationship(back_populates="accounts")
+
+    # Every collection below is *owned* by the account: its rows carry a
+    # NOT NULL ``account_id`` whose foreign key already says ON DELETE CASCADE.
+    #
+    # ``passive_deletes=True`` is what makes the ORM honour that. Without it
+    # SQLAlchemy's default on parent deletion is to load each child and
+    # *de-associate* it — writing NULL into a NOT NULL column, which PostgreSQL
+    # rejects:
+    #
+    #     NotNullViolationError: null value in column "account_id"
+    #     of relation "discounts" violates not-null constraint
+    #
+    # ``contacts`` carried the cascade from the start and so never failed; the
+    # other six did not, and nothing noticed until the first CI run deleted a
+    # seeded customer against a real database. It produced 72 teardown errors
+    # from one missing keyword.
     contacts: Mapped[list[Contact]] = relationship(
-        back_populates="account", cascade="all, delete-orphan"
+        back_populates="account", cascade="all, delete-orphan", passive_deletes=True
     )
-    subscriptions: Mapped[list[Subscription]] = relationship(back_populates="account")
-    invoices: Mapped[list[Invoice]] = relationship(back_populates="account")
-    contracts: Mapped[list[Contract]] = relationship(back_populates="account")
-    discounts: Mapped[list[Discount]] = relationship(back_populates="account")
-    tickets: Mapped[list[SupportTicket]] = relationship(back_populates="account")
-    entitlements: Mapped[list[Entitlement]] = relationship(back_populates="account")
+    subscriptions: Mapped[list[Subscription]] = relationship(
+        back_populates="account", cascade="all, delete-orphan", passive_deletes=True
+    )
+    invoices: Mapped[list[Invoice]] = relationship(
+        back_populates="account", cascade="all, delete-orphan", passive_deletes=True
+    )
+    contracts: Mapped[list[Contract]] = relationship(
+        back_populates="account", cascade="all, delete-orphan", passive_deletes=True
+    )
+    discounts: Mapped[list[Discount]] = relationship(
+        back_populates="account", cascade="all, delete-orphan", passive_deletes=True
+    )
+    tickets: Mapped[list[SupportTicket]] = relationship(
+        back_populates="account", cascade="all, delete-orphan", passive_deletes=True
+    )
+    entitlements: Mapped[list[Entitlement]] = relationship(
+        back_populates="account", cascade="all, delete-orphan", passive_deletes=True
+    )
 
     def __repr__(self) -> str:
         return f"Account(id={self.id!r}, name={self.name!r}, status={self.status!r})"
