@@ -206,6 +206,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # `.env` is gitignored, and compose declares `env_file: .env`. A checkout
+      # therefore has no `.env` and compose refuses to parse. This is the same
+      # step the README tells a developer to perform, not a CI-only shortcut.
+      - name: Provide .env from the committed example
+        run: cp .env.example .env
+
       - name: Validate the compose file
         run: docker compose config
 

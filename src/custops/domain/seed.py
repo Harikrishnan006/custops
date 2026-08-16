@@ -530,6 +530,14 @@ async def _seed_scenario(session: AsyncSession, scenario: dict[str, Any], now: d
         )
     )
 
+    # Flush before anything referencing the subscription is merged. The session
+    # factory sets ``autoflush=False``, so merges accumulate and are written by
+    # the single flush at the end of ``seed_all`` — and an invoice merged into
+    # that batch can be inserted before the subscription it points at, which
+    # PostgreSQL rejects as a foreign-key violation. Nothing caught this until
+    # CI ran the real seed against a real database for the first time.
+    await session.flush()
+
     await _seed_invoices(session, key, account_id, scenario, now)
 
     if scenario["contract"] is not None:

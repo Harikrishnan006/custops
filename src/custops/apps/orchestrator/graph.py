@@ -114,8 +114,13 @@ def build_graph(
         or a ``Command``; ours return a *partial* update dict, which is what the
         reducers merge and what every node in this system actually produces.
         The call is correct at runtime — the overloads simply do not model it.
+
+        The code is ``arg-type``, not ``call-overload``: mypy resolves this to a
+        single signature rather than an overload set. It was written as
+        ``call-overload`` and only ever checked against a warm ``.mypy_cache``,
+        which suppressed the mismatch; CI, starting cold, caught it.
         """
-        graph.add_node(name, node)  # type: ignore[call-overload]
+        graph.add_node(name, node)  # type: ignore[arg-type]
 
     register(SUPERVISOR, nodes.supervisor)
     register(PLANNER, nodes.planner)
