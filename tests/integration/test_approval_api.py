@@ -181,17 +181,53 @@ class TestApprovalRequestContents:
 
 
 class TestAuthorization:
-    async def test_an_approver_may_decide(self, client: AsyncClient) -> None:
+    async def test_an_approver_may_decide(
+        self, client: AsyncClient, finance: AsyncClient
+    ) -> None:
+        """The seeded upgrade prices above the elevated threshold.
+
+        `UMBRELLA`'s proration clears the policy's 10000.00 line, so the
+        approver with authority over it is the finance one. The operator starts
+        the run — deciding is a separate authority from requesting, which is the
+        whole point of the split (§17, DIS-002).
+        """
         started = await _pause_a_workflow(client)
         approval_id = started["awaiting_approval"]["approval_id"]
 
-        response = await client.post(
+        response = await finance.post(
             f"/approvals/{approval_id}/decision",
             json={"approved": True},
         )
 
         assert response.status_code == 200, response.text
         assert response.json()["approval"]["status"] == ApprovalStatus.APPROVED
+
+    async def test_an_approver_below_the_amount_threshold_is_refused(
+        self, client: AsyncClient, seeded: Database
+    ) -> None:
+        """The other half of the rule above, kept as its own case.
+
+        The ops user holds `approver` and would be entitled to decide a routine
+        upgrade. This one prices above the threshold, so authority is refused on
+        the *amount* rather than on the role — and the record is left untouched
+        for someone who does hold it.
+        """
+        started = await _pause_a_workflow(client)
+        approval_id = uuid.UUID(started["awaiting_approval"]["approval_id"])
+
+        response = await client.post(
+            f"/approvals/{approval_id}/decision", json={"approved": True}
+        )
+
+        assert response.status_code == 403
+        assert response.json()["detail"]["code"] == "elevated_role_required"
+
+        async with seeded.session_factory() as session:
+            approval = await session.get(Approval, approval_id)
+
+        assert approval is not None
+        assert approval.status == ApprovalStatus.PENDING
+        assert approval.decided_by_user_id is None
 
     async def test_a_user_without_an_approving_role_is_refused(
         self, client: AsyncClient, viewer: AsyncClient
@@ -295,14 +331,21 @@ class TestAuthorization:
 
 
 class TestReplayAndReuse:
-    async def test_an_approval_cannot_be_decided_twice(self, client: AsyncClient) -> None:
-        """Otherwise a rejection becomes an approval after the fact."""
+    async def test_an_approval_cannot_be_decided_twice(
+        self, client: AsyncClient, finance: AsyncClient
+    ) -> None:
+        """Otherwise a rejection becomes an approval after the fact.
+
+        Both attempts come from the approver who genuinely holds authority over
+        this amount, so the second is refused for being a replay and not for
+        want of a role — which is the property under test.
+        """
         started = await _pause_a_workflow(client)
         approval_id = started["awaiting_approval"]["approval_id"]
         body = {"approved": False}
 
-        first = await client.post(f"/approvals/{approval_id}/decision", json=body)
-        second = await client.post(
+        first = await finance.post(f"/approvals/{approval_id}/decision", json=body)
+        second = await finance.post(
             f"/approvals/{approval_id}/decision",
             json={"approved": True},
         )
@@ -314,15 +357,25 @@ class TestReplayAndReuse:
     async def test_the_original_decision_survives_a_second_attempt(
         self, client: AsyncClient, finance: AsyncClient, seeded: Database
     ) -> None:
-        """A second, more privileged approver cannot overturn the first.
+        """A settled decision is not reopened by a later attempt.
 
-        Deliberately the finance approver: if seniority could reopen a settled
-        decision, "already decided" would mean "decided by someone junior".
+        Where the sibling test asserts the *status code* of the replay, this one
+        asserts the *record*: a refused second attempt must leave the original
+        verdict and its actor exactly as they were.
+
+        A note on what this can no longer show. It used to have a junior
+        approver decide and the finance approver try to overturn, so that
+        seniority could not reopen a settled decision. Above the 10000.00
+        threshold the finance approver is the only seeded actor with authority
+        at all — there is no `admin` user — so that ordering is not expressible
+        here without lowering the amount or inventing a role. The replay is
+        therefore made by the same authorised approver, which still proves the
+        decision is closed rather than merely guarded by a role check.
         """
         started = await _pause_a_workflow(client)
         approval_id = uuid.UUID(started["awaiting_approval"]["approval_id"])
 
-        await client.post(f"/approvals/{approval_id}/decision", json={"approved": False})
+        await finance.post(f"/approvals/{approval_id}/decision", json={"approved": False})
         await finance.post(f"/approvals/{approval_id}/decision", json={"approved": True})
 
         async with seeded.session_factory() as session:
@@ -330,7 +383,7 @@ class TestReplayAndReuse:
 
         assert approval is not None
         assert approval.status == ApprovalStatus.REJECTED
-        assert approval.decided_by_user_id == OPS_APPROVER
+        assert approval.decided_by_user_id == FINANCE_APPROVER
 
     async def test_a_consumed_approval_cannot_be_re_decided(
         self, client: AsyncClient, seeded: Database
@@ -390,13 +443,15 @@ class TestReplayAndReuse:
 
 
 class TestResumeLoop:
-    async def test_approving_resumes_the_workflow(self, client: AsyncClient) -> None:
+    async def test_approving_resumes_the_workflow(
+        self, client: AsyncClient, finance: AsyncClient
+    ) -> None:
         """Reuses the graph's own interrupt/resume, not a second mechanism."""
         started = await _pause_a_workflow(client)
         approval_id = started["awaiting_approval"]["approval_id"]
 
         decision = (
-            await client.post(
+            await finance.post(
                 f"/approvals/{approval_id}/decision",
                 json={"approved": True},
             )
@@ -405,12 +460,14 @@ class TestResumeLoop:
         assert decision["workflow_resumed"] is True
         assert decision["workflow_status"] != WorkflowStatus.AWAITING_APPROVAL
 
-    async def test_rejecting_escalates_without_executing(self, client: AsyncClient) -> None:
+    async def test_rejecting_escalates_without_executing(
+        self, client: AsyncClient, finance: AsyncClient
+    ) -> None:
         started = await _pause_a_workflow(client)
         approval_id = started["awaiting_approval"]["approval_id"]
         execution_id = started["execution_id"]
 
-        await client.post(
+        await finance.post(
             f"/approvals/{approval_id}/decision",
             json={"approved": False},
         )
@@ -420,7 +477,7 @@ class TestResumeLoop:
         assert "execute" not in [step["node"] for step in trace["steps"]]
 
     async def test_the_graph_reads_the_decision_from_the_record(
-        self, client: AsyncClient, seeded: Database
+        self, client: AsyncClient, finance: AsyncClient, seeded: Database
     ) -> None:
         """One authority on what a human decided.
 
@@ -430,7 +487,7 @@ class TestResumeLoop:
         started = await _pause_a_workflow(client)
         approval_id = uuid.UUID(started["awaiting_approval"]["approval_id"])
 
-        await client.post(
+        await finance.post(
             f"/approvals/{approval_id}/decision",
             json={
                 "approved": True,
@@ -442,21 +499,21 @@ class TestResumeLoop:
             approval = await session.get(Approval, approval_id)
 
         assert approval is not None
-        assert approval.decided_by_user_id == OPS_APPROVER
+        assert approval.decided_by_user_id == FINANCE_APPROVER
         assert approval.decision_note == "Checked the discount against DIS-002."
         assert approval.decided_at is not None
 
 
 class TestAuditability:
     async def test_the_decision_is_audited_with_its_actor(
-        self, client: AsyncClient, seeded: Database
+        self, client: AsyncClient, finance: AsyncClient, seeded: Database
     ) -> None:
         """§13: actor and timestamp. An approval trail without an actor is not one."""
         started = await _pause_a_workflow(client)
         approval_id = started["awaiting_approval"]["approval_id"]
         execution_id = uuid.UUID(started["execution_id"])
 
-        await client.post(
+        await finance.post(
             f"/approvals/{approval_id}/decision",
             json={"approved": True},
         )
@@ -475,14 +532,16 @@ class TestAuditability:
 
         assert events
         assert events[0].actor_type == "user"
-        assert events[0].actor_id == str(OPS_APPROVER)
+        assert events[0].actor_id == str(FINANCE_APPROVER)
 
-    async def test_the_decision_appears_in_the_workflow_trace(self, client: AsyncClient) -> None:
+    async def test_the_decision_appears_in_the_workflow_trace(
+        self, client: AsyncClient, finance: AsyncClient
+    ) -> None:
         started = await _pause_a_workflow(client)
         approval_id = started["awaiting_approval"]["approval_id"]
         execution_id = started["execution_id"]
 
-        await client.post(
+        await finance.post(
             f"/approvals/{approval_id}/decision",
             json={"approved": True},
         )
