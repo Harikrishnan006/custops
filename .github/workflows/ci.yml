@@ -66,6 +66,9 @@ jobs:
   integration:
     name: Integration (PostgreSQL + pgvector, Redis)
     runs-on: ubuntu-latest
+    # A hang must fail fast and name the culprit, not sit for six hours. The
+    # first run of this suite stalled for 25 minutes with no way to see where.
+    timeout-minutes: 25
 
     services:
       postgres:
@@ -113,8 +116,15 @@ jobs:
       # Authentication is exercised for real: the fixtures mint genuine tokens
       # and insert genuine hashes through `custops.apps.api.security.issuance`.
       # There is no CI authentication bypass (§17, Phase 13).
+      # Diagnostics, not a change to what is tested. `--timeout` bounds each
+      # test so one stall fails that test and the suite continues, giving a
+      # complete passed/failed/skipped picture instead of an opaque hang; `-v`
+      # names every test; `--durations` exposes what is merely slow. No test is
+      # skipped, weakened or xfailed.
       - name: pytest tests/integration
-        run: uv run pytest tests/integration -q
+        run: >-
+          uv run pytest tests/integration
+          -v -rA --timeout=120 --timeout-method=signal --durations=25
 
   # ------------------------------------------------------------------- e2e
   # Separate because it needs a browser download, and because a browser is the
