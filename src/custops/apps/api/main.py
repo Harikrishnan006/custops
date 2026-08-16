@@ -6,6 +6,14 @@ Neither is connected eagerly, so the API starts even when a dependency is down
 and ``/health`` can report *why* — a process that refuses to boot cannot tell you
 what is wrong with it.
 
+The one deliberate exception is the checkpointer's schema. Its tables are
+created here, eagerly, and a failure stops the boot. That is not a retreat from
+the paragraph above: it is the same class of requirement as running Alembic
+before serving traffic, and the alternative is worse in both directions —
+creating them lazily inside a request deadlocks that request against its own
+authentication transaction, and starting without them means the first workflow
+to pause for approval discovers it cannot be persisted, which §7 forbids.
+
 ``create_app`` takes optional settings so tests can build an app against explicit
 configuration instead of mutating the environment and hoping the cache is cold.
 """
@@ -20,6 +28,7 @@ from fastapi import FastAPI
 from custops.apps.api.middleware.request_context import RequestContextMiddleware
 from custops.apps.api.routers import approvals, health, workflows
 from custops.apps.enterprise.router import router as enterprise_router
+from custops.apps.orchestrator.checkpointer import ensure_checkpointer_ready
 from custops.cache.redis_client import create_redis_client
 from custops.config import Settings, get_settings
 from custops.db.engine import create_database
@@ -46,7 +55,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         postgres=settings.postgres.safe_dsn,
         redis=settings.redis.safe_dsn,
     )
+
     try:
+        # The one eager connection, and it earns the exception. The
+        # checkpointer's tables must exist before any workflow runs, and
+        # creating them inside a request deadlocks that request against its own
+        # authentication transaction (see `ensure_checkpointer_ready`). Doing it
+        # here also means it happens once per process rather than once per
+        # execution.
+        #
+        # Inside the `try` so that a failure still releases the engine and the
+        # Redis client. Startup is exactly when a leak is easiest to miss: the
+        # process is about to die anyway, so nothing complains — until something
+        # runs several applications in one process, as the tests do.
+        await ensure_checkpointer_ready(settings)
+
         yield
     finally:
         await database.dispose()

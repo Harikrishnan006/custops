@@ -69,18 +69,27 @@ class TestIngestion:
     async def test_changed_content_replaces_chunks_rather_than_appending(
         self, session: AsyncSession
     ) -> None:
-        await ingest_document(
+        # Long enough to chunk several times over: replacement is only
+        # observable if the first ingest produced more chunks than the second,
+        # and `DEFAULT_MAX_CHARS` is 1200.
+        document, _ = await ingest_document(
             session,
             PROVIDER,
             source_type=EvidenceSource.POLICY,
             source_ref="TEST-001",
             title="Test policy",
-            body="Original text about refunds. " * 20,
+            body="Original text about refunds. " * 200,
             now=NOW,
         )
-        before = (
-            await session.execute(select(func.count()).select_from(KnowledgeChunk))
-        ).scalar_one()
+        # Scoped to this document, not the whole table — a global count also
+        # sees seeded corpus and anything a neighbouring test ingested.
+        chunks_for_document = (
+            select(func.count())
+            .select_from(KnowledgeChunk)
+            .where(KnowledgeChunk.document_id == document.id)
+        )
+        before = (await session.execute(chunks_for_document)).scalar_one()
+        assert before > 1, "fixture no longer spans multiple chunks"
 
         await ingest_document(
             session,
@@ -99,9 +108,7 @@ class TestIngestion:
                 .where(KnowledgeDocument.source_ref == "TEST-001")
             )
         ).scalar_one()
-        after = (
-            await session.execute(select(func.count()).select_from(KnowledgeChunk))
-        ).scalar_one()
+        after = (await session.execute(chunks_for_document)).scalar_one()
 
         assert documents == 1
         assert after < before  # old chunks gone, not accumulated
