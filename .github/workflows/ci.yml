@@ -1,0 +1,219 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# The evaluation regression gate lives in `evaluation.yml` and is deliberately
+# not repeated here: one regression mechanism, owned by AgentForge (§15, D10).
+
+env:
+  # Matches `config.py` defaults, so nothing in the application needs CI-specific
+  # configuration. The service container below is set up to match.
+  POSTGRES_HOST: localhost
+  POSTGRES_PORT: "5432"
+  POSTGRES_USER: custops
+  POSTGRES_PASSWORD: custops
+  POSTGRES_DB: custops
+  REDIS_HOST: localhost
+  REDIS_PORT: "6379"
+  CUSTOPS_ENVIRONMENT: test
+
+jobs:
+  # ---------------------------------------------------------------- quality
+  # First and fastest. A type error should not wait behind a two-minute suite.
+  quality:
+    name: Lint and types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv python install 3.11
+
+      # `--locked` fails if uv.lock is stale rather than silently resolving
+      # something else. A lockfile CI ignores is not a lockfile.
+      - name: Install
+        run: uv sync --locked --all-groups
+
+      - name: ruff
+        run: uv run ruff check src/ tests/ benchmarks/
+
+      - name: mypy --strict
+        run: uv run mypy --strict src/ tests/ benchmarks/
+
+  # ------------------------------------------------------------------- unit
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv python install 3.11
+      - name: Install
+        run: uv sync --locked --all-groups
+
+      # Includes the migration/schema-consistency, security and documentation
+      # suites — they are unit tests and need no infrastructure.
+      - name: pytest tests/unit
+        run: uv run pytest tests/unit -q
+
+  # ------------------------------------------------------------ integration
+  # The job that matters most: 160 tests have never executed anywhere, because
+  # no developer machine in this project has had PostgreSQL with pgvector.
+  integration:
+    name: Integration (PostgreSQL + pgvector, Redis)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # The same image `docker-compose.yml` uses. A different Postgres or a
+        # different pgvector in CI would test a system nobody runs.
+        image: pgvector/pgvector:0.8.6-pg17
+        env:
+          POSTGRES_USER: custops
+          POSTGRES_PASSWORD: custops
+          POSTGRES_DB: custops
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U custops"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+      redis:
+        image: redis:8.10
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv python install 3.11
+      - name: Install
+        run: uv sync --locked --all-groups
+
+      # The normal paths, not a CI-only database state. If `alembic upgrade
+      # head` or `custops seed` is broken, that is a defect worth failing on —
+      # constructing the schema some other way would hide it.
+      - name: Apply migrations
+        run: uv run alembic upgrade head
+
+      - name: Seed
+        run: uv run custops seed
+
+      # Authentication is exercised for real: the fixtures mint genuine tokens
+      # and insert genuine hashes through `custops.apps.api.security.issuance`.
+      # There is no CI authentication bypass (§17, Phase 13).
+      - name: pytest tests/integration
+        run: uv run pytest tests/integration -q
+
+  # ------------------------------------------------------------------- e2e
+  # Separate because it needs a browser download, and because a browser is the
+  # flakiest dependency in the project. Failing here must not obscure a green
+  # integration run.
+  e2e:
+    name: End-to-end (Chromium)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.6-pg17
+        env:
+          POSTGRES_USER: custops
+          POSTGRES_PASSWORD: custops
+          POSTGRES_DB: custops
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U custops"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:8.10
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv python install 3.11
+      - name: Install
+        run: uv sync --locked --all-groups
+
+      - name: Install Chromium
+        run: uv run playwright install --with-deps chromium
+
+      - name: Apply migrations and seed
+        run: |
+          uv run alembic upgrade head
+          uv run custops seed
+
+      - name: pytest tests/e2e
+        run: uv run pytest tests/e2e -q
+
+  # ---------------------------------------------------------------- package
+  # Mirrors the check that caught a real defect in AgentForge: a project can
+  # pass every test and still be uninstallable.
+  package:
+    name: Installable outside its checkout
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv python install 3.11
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      - name: Install the wheel into a clean venv and import it from elsewhere
+        run: |
+          python -m venv /tmp/probe
+          /tmp/probe/bin/pip install --quiet dist/*.whl
+          cd /tmp
+          /tmp/probe/bin/python -c "
+          import custops
+          from custops.config import Settings
+          from custops.domain.policies.endpoint_authority import ENDPOINT_MATRIX
+          from custops.mcp.permissions.matrix import PERMISSION_MATRIX
+          assert ENDPOINT_MATRIX and PERMISSION_MATRIX
+          print('installed OK:', custops.__version__)
+          "
+
+      - name: The console script is on PATH
+        run: |
+          cd /tmp
+          /tmp/probe/bin/custops --help
+
+  # -------------------------------------------------------------- container
+  # Phase 1's definition of done requires `docker compose up` to start exactly
+  # three services. Nothing has ever verified that the image still builds.
+  container:
+    name: Image and compose
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate the compose file
+        run: docker compose config
+
+      - name: Exactly three services
+        run: |
+          services=$(docker compose config --services | sort | tr '\n' ' ')
+          echo "services: $services"
+          test "$services" = "api postgres redis "
+
+      - name: Build the API image
+        run: docker build -f infrastructure/docker/api.Dockerfile -t custops-api:ci .

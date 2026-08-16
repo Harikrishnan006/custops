@@ -142,3 +142,18 @@ structure to consume.
   build on complete traces.
 - Phases 13–14: security hardening; CI/CD and final documentation.
 - 156 tests pending PostgreSQL / Chromium.
+
+---
+
+## Rule 23 — what you should be able to explain
+
+1. Why nineteen event types existed but only four were ever written.
+2. Why ordering on `occurred_at` alone was wrong, and what `now()` actually
+   returns in PostgreSQL.
+3. Why `tool_called` is written outside the savepoint.
+4. Why `retry` and `replan` are emitted by the runner rather than the nodes.
+5. Why redaction runs both on the way in and on the way out.
+6. Why a dropped chain-of-thought key is recorded as dropped, but a masked
+   secret is recorded as masked.
+7. Why authentication failures are not audit events.
+8. How the taxonomy test makes it hard to add an event without emitting it.

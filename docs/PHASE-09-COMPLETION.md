@@ -160,3 +160,18 @@ A2A_BILLING_SPECIALIST_URL=http://127.0.0.1:8200
 
 `A2A_ENABLED` defaults to `false` deliberately: a main workflow that silently
 depends on an optional process being up is an undeclared hard dependency.
+
+---
+
+## Rule 23 — what you should be able to explain
+
+1. What makes the specialist genuinely out-of-process, beyond speaking HTTP.
+2. Why the request carries identifiers rather than billing data.
+3. Why the specialist may raise an approval gate but never lower one.
+4. Why its verdict fields are named `billing_eligible` and `approval_indicated`
+   rather than `eligible` and `requires_approval`.
+5. Why a refusal is a completed exchange with a failed task, not an HTTP 500.
+6. What happens to the workflow when the specialist is switched off, and why
+   that is the default.
+7. Why the local figure governs a disagreement about money.
+8. Why the specialist holds a read-only MCP role rather than mutating directly.

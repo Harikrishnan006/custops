@@ -212,6 +212,64 @@ before acting.
 
 ---
 
+## Running a workflow
+
+Everything below `/health` and `/enterprise` requires a bearer token. Mint one
+for a seeded user — it is printed **once** and only its hash is stored:
+
+```bash
+uv run custops issue-token --email ops.approver@custops.example.com --label laptop
+```
+
+Export it:
+
+```bash
+export CUSTOPS_TOKEN=custops_...
+```
+
+Start a run. The `ops.approver` user holds the `operator` role, which is what
+starting a workflow requires — it reaches billing, CRM and the legacy portal:
+
+```bash
+curl -X POST http://localhost:8000/workflows   -H "Authorization: Bearer $CUSTOPS_TOKEN"   -H "Content-Type: application/json"   -d '{"request": "Upgrade ACME to the enterprise plan."}'
+```
+
+`201` means it ran to completion. **`202` means it paused for a human** — the
+graph hit the approval gate and interrupted. Try `UMBRELLA`, whose 35% discount
+trips the threshold.
+
+Reconstruct the full trace afterwards — graph steps, tool calls and audit events
+merged into one ordered timeline:
+
+```bash
+curl -H "Authorization: Bearer $CUSTOPS_TOKEN"   "http://localhost:8000/workflows/<execution_id>"
+```
+
+### Approving a paused run
+
+List what is waiting, then decide. Note the decision body carries **no
+identity** — who approved comes from the token, never from the request:
+
+```bash
+curl -H "Authorization: Bearer $CUSTOPS_TOKEN"   "http://localhost:8000/approvals?status=pending"
+```
+
+```bash
+curl -X POST "http://localhost:8000/approvals/<approval_id>/decision"   -H "Authorization: Bearer $CUSTOPS_TOKEN"   -H "Content-Type: application/json"   -d '{"approved": true, "note": "Checked the contract."}'
+```
+
+High-value upgrades need `finance.approver@custops.example.com`; a plain
+approver reaching the endpoint still cannot sign off past the threshold. A
+`viewer@custops.example.com` token can read everything and decide nothing.
+
+Revoke a credential when you are done with it:
+
+```bash
+uv run custops revoke-token --token-id <id>
+```
+
+---
+
 ## Development
 
 ```bash
@@ -222,11 +280,25 @@ uv run pytest
 uv run ruff check . ; uv run ruff format --check . ; uv run mypy
 ```
 
-**Skipped tests are expected without live services.** Integration tests check
-whether PostgreSQL and Redis are reachable and skip with a reason if they are
-not, rather than failing — a skip reports "not exercised", while a failure would
-claim the code is broken. With no services running you should see roughly
-`36 passed, 10 skipped`; with both running, all 46 pass.
+**Skipped tests are expected without live services.** Integration tests probe
+PostgreSQL and Redis and skip with the precise blocker named, rather than
+failing — a skip reports "not exercised", while a failure would claim the code
+is broken. Without services you should see roughly `650 passed, 160 skipped`;
+CI runs the skipped ones against a real `pgvector/pgvector:0.8.6-pg17` service
+container.
+
+The evaluation regression gate is separate, and deterministic — the LLM judge is
+never used in CI, because a build check that fails when an API call times out is
+worse than no check:
+
+```bash
+uv run custops evaluate --version "$(git rev-parse --short HEAD)"
+```
+
+It exits non-zero when [AgentForge](https://github.com/Harikrishnan006/agent-forge)
+detects a regression against the committed baseline. `agent-forge` is a **dev
+dependency** — a production install pulls neither it nor pandas, pyarrow or
+google-genai, and a test asserts no production module imports it.
 
 Run only one layer:
 

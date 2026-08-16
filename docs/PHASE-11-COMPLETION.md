@@ -162,3 +162,18 @@ subprocess pair (**PostgreSQL**), provisioning (**Chromium**).
 
 - Phases 13–14: security hardening; CI/CD and final documentation.
 - 160 tests pending PostgreSQL / Chromium.
+
+---
+
+## Rule 23 — what you should be able to explain
+
+1. Why AgentForge is a dev dependency and not a runtime one.
+2. How a CustOps execution becomes an `AgentTrace`, step type by step type.
+3. The difference between REFUSAL and ESCALATION, and why AgentForge cannot
+   catch a confusion between them.
+4. Why the datasets hold CustOps rows rather than ready-made traces.
+5. Why `available_tools` is read from the permission matrix.
+6. Which metrics gate a build and which are report-only, and why that split
+   exists rather than being a preference.
+7. Why `avg_steps` had to be added to the summary by hand.
+8. What a REASONING step is allowed to contain, and why.

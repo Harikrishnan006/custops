@@ -135,3 +135,17 @@ benchmark and transmit information about a private codebase.
 - Phases 11–14: evaluation platform, observability, security hardening, CI/CD and
   final documentation.
 - Streamlit remains deferred.
+
+---
+
+## Rule 23 — what you should be able to explain
+
+1. Why the comparison measures framework overhead rather than end-to-end latency.
+2. Why the CrewAI stub had to emulate a tool call, and what the first version
+   measured instead.
+3. Why the benchmark lives outside `src/custops/`.
+4. Why the per-source latencies had to exceed ~16ms on Windows.
+5. What the token-count difference actually comes from, structurally.
+6. Why both frameworks scored 100% on evidence completeness, and what that does
+   and does not prove.
+7. Why the decision would be the same even if CrewAI had been faster.

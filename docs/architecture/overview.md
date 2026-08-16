@@ -1,153 +1,228 @@
 # Architecture overview
 
-> **Scope note.** This document describes what exists **as of Phase 1**, and
-> marks everything else as planned. Documentation that describes unbuilt
-> software as if it were built is worse than no documentation (Rules 20, 21).
+The delivered system, as of Phase 14. Where a design choice had a real
+alternative, the reasoning lives in an [ADR](../decisions/) and is linked rather
+than repeated.
+
+---
 
 ## What the system is
 
-An agentic platform for B2B SaaS customer operations. It receives
-natural-language business requests and converts them into executable, stateful,
-auditable workflows that produce **real state changes across real systems**, not
-text.
+An orchestrator for B2B SaaS customer operations. It takes a natural-language
+request — *"upgrade Acme to enterprise"* — and carries it through to a verified
+change across three systems of record: billing, CRM, and a legacy provisioning
+portal that has no API.
 
-The reference request, and the one workflow shipped end-to-end (decision D3):
+One workflow ships end to end (Subscription Upgrade, decision D3). Depth over
+breadth: three shallow workflows would be variations on one graph.
 
-> *"Upgrade Acme from Professional to Enterprise. Check eligibility, verify the
-> contract, calculate pricing, update the CRM and billing system, and send
-> confirmation."*
+## The shape of a run
+
+```mermaid
+flowchart TD
+    START([request]) --> SUP[supervisor<br/><i>classify</i>]
+    SUP -->|unclassifiable| ESC[escalate]
+    SUP -->|classified| PLAN[planner]
+    PLAN --> RES[research<br/><i>gather evidence via MCP</i>]
+    RES -->|evidence insufficient| ESC
+    RES --> DEC[decide<br/><i>deterministic rules</i>]
+    DEC -->|approval required| GATE[approval_gate<br/><b>interrupt</b>]
+    DEC -->|clear| EXE[execute]
+    GATE -->|approved| EXE
+    GATE -->|rejected| ESC
+    EXE --> VAL[validate<br/><i>re-read every system</i>]
+    VAL -->|pass| NOT[notify] --> DONE[complete] --> END([end])
+    VAL -->|retryable| RETRY[/retry<br/>spend budget/] --> EXE
+    VAL -->|replan| REPLAN[/replan<br/>spend budget/] --> PLAN
+    VAL -->|budget exhausted| ESC
+    ESC --> END
+
+    style GATE fill:#fde68a,stroke:#b45309
+    style DEC fill:#bbf7d0,stroke:#15803d
+    style VAL fill:#bbf7d0,stroke:#15803d
+```
+
+Green nodes decide nothing with a model: eligibility, pricing and the approval
+requirement come from `domain/rules` and `domain/policies`. The amber node
+**interrupts** — the run stops, the process may exit, and a human decides hours
+later. That is what the PostgreSQL checkpointer is for.
+
+`retry` and `replan` are graph-owned bookkeeping nodes, not agent behaviour.
+They spend a budget *before* repeating work, so termination does not depend on a
+node remembering to increment a counter.
 
 ## Three protocols, three distinct jobs
 
-The single most important thing to be able to state about this architecture, and
-the thing most likely to be asked about:
+The most common confusion about this system is that MCP and A2A overlap. They do
+not.
 
-| Concern | Technology | Question it answers |
-|---|---|---|
-| Workflow / state orchestration | **LangGraph** | What happens next, and what is the state? |
-| Agent → agent communication | **A2A** | How does this agent ask *another autonomous agent* for a capability it does not own? |
-| Agent → tool communication | **MCP** | How does an agent invoke a typed, permissioned capability? |
+```mermaid
+flowchart LR
+    subgraph orchestrator["Orchestrator process"]
+        GRAPH[LangGraph<br/><i>agent ↔ agent, in-process</i>]
+        AGENTS[Supervisor · Planner · Research<br/>Execution · Validator]
+        GRAPH --- AGENTS
+    end
 
-They are not interchangeable, and none is a transport detail of another.
-LangGraph holds the state machine. A2A crosses an ownership boundary to another
-agent (the Billing Specialist, decision D6 — a separate process, own port, own
-capability contract). MCP is how any agent touches an enterprise system at all;
-agents get no arbitrary database access.
+    subgraph tools["Systems of record"]
+        BILL[(Billing)]
+        CRM[(CRM)]
+        SUP[(Support)]
+        KB[(pgvector<br/>knowledge)]
+        PORTAL[Legacy portal<br/><i>browser only</i>]
+    end
 
-## Current state (Phase 1)
+    SPEC[Billing Specialist<br/><i>separate process, own port</i>]
 
-```
-┌──────────────────────────────────────────────┐
-│ api (FastAPI)                                │
-│   RequestContextMiddleware → request_id      │
-│   GET /health                                │
-│     ├── probe → postgres  (SELECT 1, pgvector version)
-│     └── probe → redis     (PING)             │
-│   structured JSON logging, execution_id field│
-└──────────────────────────────────────────────┘
-         │                        │
-   ┌─────▼──────┐          ┌──────▼─────┐
-   │ postgres   │          │ redis      │
-   │ + pgvector │          │ (role TBD, │
-   │ 4 tables   │          │  ADR-003)  │
-   └────────────┘          └────────────┘
+    AGENTS -->|MCP<br/>agent → tool| MCPL{{MCP tool layer<br/>permission · approval · audit}}
+    MCPL --> BILL & CRM & SUP & KB
+    MCPL -->|Playwright| PORTAL
+    AGENTS -->|A2A<br/>agent → agent, cross-process| SPEC
+    SPEC -->|its own MCP role| MCPL
+
+    style MCPL fill:#dbeafe,stroke:#1d4ed8
+    style SPEC fill:#e9d5ff,stroke:#7e22ce
 ```
 
-Implemented:
+- **LangGraph** orchestrates agents inside one process. It is not a protocol for
+  reaching anything external.
+- **MCP** is the only path from an agent to a tool. Permission, approval and
+  audit happen there, so a tool cannot forget a check it never performs.
+- **A2A** is agent-to-agent across a process boundary. The Billing Specialist
+  runs on its own port, holds its own read-only MCP role, and the orchestrator
+  degrades gracefully when it is absent ([ADR-006](../decisions/ADR-006-a2a-specialist-boundary.md)).
 
-- **Configuration** — one Pydantic Settings surface; nothing reads `os.environ`.
-- **Structured logging** — JSON, one pipeline for application *and* third-party
-  records, `execution_id` present on every line (null until Phase 5 sets it).
-- **Database** — async SQLAlchemy 2.0, Alembic migrations, pgvector enabled,
-  identity + audit foundation tables.
-- **Health** — live, bounded, concurrent dependency probes; 200/503.
+Note the specialist's arrow back into the MCP layer: being a separate process
+does not put it outside the tool boundary, it puts it on the far side of one.
 
-Not implemented, and deliberately absent rather than stubbed (Rule 6): every
-agent, the graph, MCP, A2A, the legacy portal, Playwright, evaluation.
+## Security boundaries
 
-## Target architecture
+Four independent gates. The point is that no single one is trusted.
 
+```mermaid
+flowchart TD
+    REQ[HTTP request] --> AUTH{1 · Authentication<br/><i>bearer token → Principal</i>}
+    AUTH -->|no/expired/revoked token| R401[401]
+    AUTH --> ENDP{2 · Endpoint authority<br/><i>which roles may act</i>}
+    ENDP -->|wrong role| R403[403]
+    ENDP --> FLOW[workflow runs]
+
+    FLOW --> TOOL{3 · Tool permission<br/><i>which agent role may call</i>}
+    TOOL -->|denied| TERR[tool error + audit row]
+    TOOL --> APPR{4 · Approval<br/><i>verified per mutation</i>}
+    APPR -->|no valid approval| TERR
+    APPR --> MUT[(mutation applied)]
+
+    MUT --> AUD[[audit_events<br/>one recorder · redacted]]
+    TERR --> AUD
+
+    style AUTH fill:#fecaca,stroke:#b91c1c
+    style ENDP fill:#fed7aa,stroke:#c2410c
+    style TOOL fill:#fde68a,stroke:#b45309
+    style APPR fill:#bbf7d0,stroke:#15803d
 ```
-USER REQUEST
-    ↓ SUPERVISOR      classify, route, monitor
-    ↓ PLANNER         structured execution plan (Pydantic structured output)
-    ↓ RESEARCH        RAG + system-of-record evidence, with source references
-    ↓ DECISION        deterministic rules + LLM reasoning
-    ↓ APPROVAL GATE   if risk thresholds exceeded (graph interrupt)
-    ↓ EXECUTION       MCP tools + A2A billing specialist + Playwright
-    ↓ VALIDATION      expected vs actual, across every affected system
-    ↓ RETRY / REPLAN  bounded by configuration, enforced in Python
-    ↓ AUDIT + RESULT
+
+Gates 1 and 2 are Phase 13; 3 is the Phase 4 permission matrix; 4 is D9's
+third layer, which the MCP tool verifies **independently** — a mutating tool
+called directly, bypassing the graph entirely, still refuses. That is tested by
+doing exactly that.
+
+**Identity has one source.** The approval endpoint used to take `actor_user_id`
+in the request body; it no longer does, and the schema forbids extras
+([ADR-007](../decisions/ADR-007-authentication-model.md)). A perfect audit trail
+of a forged identity is worse than none, because it looks like evidence.
+
+## How a trace is reconstructed
+
+Three layers write independently under one `execution_id`. That they agree is
+itself informative.
+
+```mermaid
+flowchart LR
+    subgraph writers["Written during the run"]
+        STEP[workflow_steps<br/><i>graph, per node visit</i>]
+        TC[tool_calls<br/><i>MCP layer</i>]
+        AE[audit_events<br/><i>19 event types</i>]
+    end
+
+    REC[[record_event<br/>single path · redaction]] --> AE
+
+    STEP & TC & AE --> ASM[build_timeline<br/><i>pure, ordered</i>]
+    ASM --> EP[GET /workflows/&#123;execution_id&#125;]
+    ASM --> COV[event coverage<br/><i>what never happened</i>]
+
+    style REC fill:#dbeafe,stroke:#1d4ed8
+    style ASM fill:#bbf7d0,stroke:#15803d
 ```
 
-### The honesty check that shapes the design
+Ordering is `(occurred_at, id)`, not `occurred_at` alone: PostgreSQL's `now()`
+is *transaction* time, so three events written in one savepoint share a
+timestamp. The monotonic id breaks the tie in insertion order — without it a
+tool's completion can sort before the call that produced it.
 
-The legacy provisioning portal (decision D8) has **no API**; entitlements are
-authoritative there and must be flipped through a browser. This creates the
-system's central engineering point:
+**Never chain-of-thought.** Redaction runs inside the recorder *and* again at
+the endpoint, because rows may predate the recorder and the endpoint is the
+boundary that actually discloses.
 
-> The billing API can return `200` while the entitlement never flipped.
-> **API success ≠ business success.**
+---
 
-That is why the Validator re-reads state from every system of record rather than
-trusting the executing agent's return value (§14), and why validation is a graph
-node rather than an assertion inside the execution step.
+## Where the LLM is, and is not
 
-### Where the LLM is, and is not
-
-| LLM | Deterministic Python |
+| The model does | The model never does |
 |---|---|
-| Language understanding, classification | Pricing, proration, financial arithmetic |
-| Plan generation | Approval and discount thresholds |
-| Document / policy interpretation | Permission and authorization checks |
-| Evidence synthesis, rationale | State-transition legality, retry/replan budgets |
+| Classify a request | Decide eligibility |
+| Draft a plan | Compute a price |
+| Draft customer prose | Judge whether its own evidence was sufficient |
+| Explain a blocker | Authorise a mutation |
 
-Enforced structurally: rules live in `domain/rules/` and `domain/policies/`, are
-called from Python, and are never exposed as tools a model can influence. **An
-LLM cannot override an authorization or safety rule** (§12).
+Every consequential decision is Python reading structured facts, which is what
+makes the Validator able to recompute an outcome from evidence alone and
+disagree with the agent that produced it.
 
-Approval is enforced in *three* layers, of which the third is the real one
-(decision D9): the graph routes to an approval gate; the API records the human
-decision; and **every mutating MCP tool independently verifies an approval
-record in PostgreSQL before acting**. The graph is a happy path; the tool is the
-boundary. A test calls the tool directly, bypassing the graph, and asserts
-rejection.
+## Validation
+
+The Validator re-reads **from the systems of record**, never from what execute
+returned, and reads the legacy portal *through the portal* rather than querying
+the entitlements table — a validator that checks its own side of an integration
+proves nothing. A billing `200` is not business success (D8).
+
+## Evaluation
+
+`agent-forge@v0.1.0` scores the orchestrator; it is a **dev dependency** and no
+production module imports it (D10). CustOps supplies the trace adapter, the
+adversarial datasets, and the metrics a generic harness cannot compute —
+planning accuracy, retrieval precision/recall, and whether the Validator caught
+an *injected* divergence. Regression gating is AgentForge's, unmodified.
 
 ## Layout
 
-See [ADR-001](../decisions/ADR-001-repository-layout.md) for why application code
-sits under `src/custops/` rather than at the repository root.
-
 ```
 src/custops/
-    apps/api/          FastAPI entrypoint            ✅ Phase 1
-    apps/orchestrator/ LangGraph runtime             ◻ Phase 5
-    apps/enterprise/   CRM / billing / support       ◻ Phase 2  (one service, D5)
-    apps/legacy_portal/ API-less provisioning portal ◻ Phase 8
-    agents/            supervisor, planner, research, execution, validator,
-                       billing_specialist            ◻ Phases 5, 9
-    a2a/               contracts/, client/           ◻ Phase 9
-    mcp/               server/, tools/, permissions/ ◻ Phase 4
-    workflows/         subscription_upgrade/         ◻ Phase 6
-    domain/models/     SQLAlchemy models             ✅ Phase 1 (foundation only)
-    domain/rules/      deterministic business rules  ◻ Phase 2
-    domain/policies/   thresholds, permissions       ◻ Phase 7
-    knowledge/         ingestion/, retrieval/        ◻ Phase 3
-    providers/         model provider abstraction    ◻ Phase 5  (D11: pluggable)
-    observability/     logging, context, events      ✅ Phase 1
-    evaluation/        orchestrator evaluators       ◻ Phase 11 (D10: imports
-                                                       llm-agent-eval-platform)
+  agents/          LangGraph nodes, state, routing, budgets
+  apps/
+    api/           HTTP surface, security (authn/authz)
+    orchestrator/  graph assembly, runner, checkpointer
+    enterprise/    systems of record
+    billing_specialist/  the A2A process
+    legacy_portal/ the portal that has no API
+  a2a/             contracts + client for agent↔agent
+  mcp/             tool layer: permissions, runtime, tools
+  domain/          models, deterministic rules, policies
+  knowledge/       chunking, embedding, pgvector retrieval
+  observability/   events, audit recorder, redaction, trace
+  evaluation/      adapter + datasets (dev-only)
+  providers/       model provider abstraction
+benchmarks/        CrewAI comparison (dev-only, outside the package)
 ```
-
-Directories arrive with the phase that fills them; empty packages are not
-created in advance.
 
 ## Decision record
 
-| ADR | Subject | Status |
+| ADR | Decision | Status |
 |---|---|---|
-| [001](../decisions/ADR-001-repository-layout.md) | `src/custops/` layout | Accepted |
-| [002](../decisions/ADR-002-postgres-with-pgvector.md) | One PostgreSQL, pgvector as extension | Accepted |
-| [003](../decisions/ADR-003-redis-role.md) | What Redis is for | 🟡 Open — Phase 5 |
-| 004 | Orchestration framework: LangGraph vs CrewAI | Reserved — Phase 10 (§10) |
-| [005](../decisions/ADR-005-pgvector-index-type.md) | HNSW over IVFFlat for the pgvector index | Accepted |
+| [001](../decisions/ADR-001-repository-layout.md) | `src/custops/` to avoid shadowing the MCP and A2A SDKs | Accepted |
+| [002](../decisions/ADR-002-postgres-with-pgvector.md) | One PostgreSQL, with pgvector | Accepted |
+| [003](../decisions/ADR-003-redis-role.md) | Redis is a cache, not a queue | Accepted |
+| [004](../decisions/ADR-004-orchestration-framework.md) | LangGraph over CrewAI, measured | Accepted |
+| [005](../decisions/ADR-005-pgvector-index-type.md) | HNSW over IVFFlat | Accepted |
+| [006](../decisions/ADR-006-a2a-specialist-boundary.md) | What the A2A boundary may carry | Accepted |
+| [007](../decisions/ADR-007-authentication-model.md) | Bearer tokens; identity from the principal | Accepted |

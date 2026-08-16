@@ -171,3 +171,18 @@ finance-approver form above.
 - 160 tests pending PostgreSQL / Chromium.
 - Not in §17 and deliberately not done: rate limiting, TLS termination, CORS
   policy, secret rotation. Deployment is out of scope (§22).
+
+---
+
+## Rule 23 — what you should be able to explain
+
+1. Why an audit trail of a forged identity is worse than no audit trail.
+2. Why SHA-256 unsalted is correct here and would be wrong for passwords.
+3. Why `actor_user_id` was removed rather than ignored.
+4. Why a 401 body does not say whether the token was expired, revoked or unknown.
+5. The difference between endpoint authority and approval authority, and why
+   both apply.
+6. Why there is no authentication-disabled test mode.
+7. Why deactivating a user ends access without revoking their tokens.
+8. Which three existing tests changed meaning, and why that was an improvement
+   rather than a regression.
