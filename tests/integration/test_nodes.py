@@ -43,7 +43,7 @@ from custops.knowledge.ingestion.pipeline import ingest_contracts, ingest_polici
 from custops.providers.chat import DeterministicChatProvider
 from custops.providers.deterministic import DeterministicEmbeddingProvider
 from custops.provisioning.client import StubProvisioningClient
-from tests.integration.conftest import requires_postgres
+from tests.integration.conftest import TEST_RETRIEVAL_POLICY, requires_postgres
 
 pytestmark = [pytest.mark.integration, requires_postgres]
 
@@ -104,6 +104,7 @@ def _deps(
         chat=chat or _chat(),
         embedder=EMBEDDER,
         provisioning=provisioning,
+        retrieval_policy=TEST_RETRIEVAL_POLICY,
         clock=lambda: NOW,
     )
 

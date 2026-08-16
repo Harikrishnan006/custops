@@ -33,7 +33,7 @@ from custops.domain.models.knowledge import EMBEDDING_DIMENSIONS
 from custops.domain.seed import clear_seed_data, seed_all, seed_id
 from custops.providers.chat import DeterministicChatProvider
 from custops.providers.deterministic import DeterministicEmbeddingProvider
-from tests.integration.conftest import requires_postgres
+from tests.integration.conftest import TEST_RETRIEVAL_POLICY, requires_postgres
 
 pytestmark = [pytest.mark.integration, requires_postgres]
 
@@ -64,6 +64,7 @@ def _consulting_deps(database: Database, transport: httpx.MockTransport | None) 
             if transport is not None
             else None
         ),
+        retrieval_policy=TEST_RETRIEVAL_POLICY,
         clock=lambda: NOW,
     )
 

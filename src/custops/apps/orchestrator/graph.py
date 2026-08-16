@@ -115,12 +115,14 @@ def build_graph(
         reducers merge and what every node in this system actually produces.
         The call is correct at runtime — the overloads simply do not model it.
 
-        The code is ``arg-type``, not ``call-overload``: mypy resolves this to a
-        single signature rather than an overload set. It was written as
-        ``call-overload`` and only ever checked against a warm ``.mypy_cache``,
-        which suppressed the mismatch; CI, starting cold, caught it.
+        The ignore is unqualified on purpose. mypy reports this as
+        ``call-overload`` or ``arg-type`` depending on which it reaches first,
+        and that shifts with unrelated edits elsewhere in the module graph — it
+        has been observed as each. It also checks *unused* ignores per code, so
+        naming any subset is unstable in both directions. Naming one is what
+        first broke CI: it passed on a warm cache and failed on a cold one.
         """
-        graph.add_node(name, node)  # type: ignore[arg-type]
+        graph.add_node(name, node)  # type: ignore
 
     register(SUPERVISOR, nodes.supervisor)
     register(PLANNER, nodes.planner)

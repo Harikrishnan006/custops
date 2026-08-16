@@ -45,6 +45,7 @@ from custops.db.engine import Database
 from custops.domain.models.approval import ToolCall
 from custops.domain.models.audit import AuditEvent
 from custops.domain.models.workflow import WorkflowExecution, WorkflowStep
+from custops.domain.policies.retrieval import RetrievalPolicy
 from custops.observability.events import WORKFLOW_EVENT_NAMES
 from custops.observability.logging import get_logger
 from custops.observability.redaction import redact
@@ -70,12 +71,31 @@ def get_chat_provider(
     return DeterministicChatProvider()
 
 
+def get_retrieval_policy() -> RetrievalPolicy | None:
+    """The sufficiency threshold for retrieval.
+
+    ``None`` is the production answer: ``RetrievalPolicy()``'s default minimum
+    similarity of 0.35, calibrated for a real embedding model. Overridden only
+    by the integration suite, which runs a deterministic lexical embedder whose
+    scores sit on a different scale — see ``tests/integration/conftest.py``.
+    Overriding it changes *where* the sufficiency line sits, never whether one
+    exists.
+    """
+    return None
+
+
 def get_runner(
     settings: Annotated[Settings, Depends(get_settings)],
     database: Annotated[Database, Depends(get_database)],
     chat: Annotated[ChatProvider, Depends(get_chat_provider)],
+    retrieval_policy: Annotated[RetrievalPolicy | None, Depends(get_retrieval_policy)],
 ) -> WorkflowRunner:
-    return WorkflowRunner(settings=settings, database=database, chat=chat)
+    return WorkflowRunner(
+        settings=settings,
+        database=database,
+        chat=chat,
+        retrieval_policy=retrieval_policy,
+    )
 
 
 @router.post(

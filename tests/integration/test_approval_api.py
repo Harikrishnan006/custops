@@ -41,6 +41,7 @@ from tests.integration.conftest import (
     bearer,
     issue_test_token,
     requires_postgres,
+    use_test_retrieval_policy,
 )
 
 pytestmark = [pytest.mark.integration, requires_postgres]
@@ -93,6 +94,7 @@ async def seeded(database: Database) -> AsyncIterator[Database]:
 @pytest.fixture
 async def app(seeded: Database, runtime_settings: Settings) -> AsyncIterator[FastAPI]:
     application: FastAPI = create_app(settings=runtime_settings)
+    use_test_retrieval_policy(application)
     application.dependency_overrides[get_chat_provider] = lambda: _chat(NEEDS_APPROVAL)
     async with application.router.lifespan_context(application):
         yield application

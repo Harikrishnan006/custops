@@ -29,8 +29,10 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from custops.apps.api.main import create_app
+from custops.apps.api.routers.workflows import get_retrieval_policy
 from custops.config import Settings, get_settings
 from custops.db.engine import Database, create_database
+from custops.domain.policies.retrieval import RetrievalPolicy
 from tests.support import service_reachable
 
 _settings = get_settings()
@@ -124,6 +126,9 @@ async def database(runtime_settings: Settings) -> AsyncIterator[Database]:
 async def live_app(runtime_settings: Settings) -> AsyncIterator[FastAPI]:
     """An application with its lifespan actually run, holding real connections."""
     application = create_app(settings=runtime_settings)
+    # The deterministic embedder's scores sit on a different scale from a real
+    # model's; without this every workflow escalates at research.
+    application.dependency_overrides[get_retrieval_policy] = lambda: TEST_RETRIEVAL_POLICY
     async with application.router.lifespan_context(application):
         yield application
 
@@ -202,3 +207,38 @@ async def viewer_client(live_app: FastAPI, database: Database) -> AsyncIterator[
     client = await authenticated_client(live_app, database, email=VIEWER_EMAIL)
     async with client:
         yield client
+
+
+# ---------------------------------------------------------------------------
+# Retrieval calibration for the deterministic embedder
+# ---------------------------------------------------------------------------
+# A similarity threshold is a property of the embedding model, not of the
+# business rule. `RetrievalPolicy()`'s production default of 0.35 is calibrated
+# for a real embedding model; the deterministic lexical double produces scores
+# on a different scale, so the same number would read every result as
+# insufficient and escalate every workflow before it reached a decision.
+#
+# The value below is measured, not chosen. Against the seeded policy corpus and
+# the queries the research node actually issues:
+#
+#     relevant best-match   +0.1754 … +0.2402
+#     unrelated text        +0.0000  (max and mean, over five samples)
+#
+# 0.10 sits between them with room on both sides: ~0.075 below the weakest
+# genuine match and 0.10 above the strongest unrelated one. It is emphatically
+# *not* permissive — `tests/unit/test_retrieval_calibration.py` proves unrelated
+# content still falls short of it and still escalates.
+TEST_RETRIEVAL_MINIMUM_SIMILARITY = 0.10
+
+TEST_RETRIEVAL_POLICY = RetrievalPolicy(
+    minimum_similarity=TEST_RETRIEVAL_MINIMUM_SIMILARITY
+)
+
+
+def use_test_retrieval_policy(app: FastAPI) -> None:
+    """Point an app's retrieval gate at the calibrated threshold.
+
+    Overrides the same dependency production resolves, so the injection path is
+    exercised rather than bypassed.
+    """
+    app.dependency_overrides[get_retrieval_policy] = lambda: TEST_RETRIEVAL_POLICY

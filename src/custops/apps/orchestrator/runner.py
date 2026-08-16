@@ -35,6 +35,7 @@ from custops.apps.orchestrator.graph import REPLAN, RETRY, compile_graph
 from custops.config import Settings
 from custops.db.engine import Database
 from custops.domain.models.workflow import WorkflowExecution, WorkflowStep
+from custops.domain.policies.retrieval import RetrievalPolicy
 from custops.observability.audit import record_event
 from custops.observability.context import bind_context
 from custops.observability.events import ActorType, EventType
@@ -95,6 +96,7 @@ class WorkflowRunner:
         in_memory_checkpointer: bool = False,
         provisioning: ProvisioningClient | None = None,
         billing_specialist: BillingSpecialistClient | None = None,
+        retrieval_policy: RetrievalPolicy | None = None,
     ) -> None:
         self._settings = settings
         self._database = database
@@ -114,6 +116,10 @@ class WorkflowRunner:
         # Off unless configured. A main workflow that silently depends on an
         # optional process being up has an undeclared hard dependency (ADR-006).
         self._billing_specialist = billing_specialist or _specialist_from(settings)
+        # None means the production default (minimum similarity 0.35), which is
+        # calibrated for a real embedding model. Injectable because the
+        # threshold belongs to the provider, not to the workflow.
+        self._retrieval_policy = retrieval_policy
 
     async def start(self, *, raw_request: str, request_id: str | None = None) -> RunOutcome:
         """Begin a new run, returning when it completes or pauses."""
@@ -157,6 +163,7 @@ class WorkflowRunner:
             embedder=embedder,
             provisioning=self._provisioning,
             billing_specialist=self._billing_specialist,
+            retrieval_policy=self._retrieval_policy,
         )
         nodes = build_nodes(deps)
         config: RunnableConfig = {"configurable": {"thread_id": str(execution_id)}}

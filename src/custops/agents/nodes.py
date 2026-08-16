@@ -56,6 +56,7 @@ from custops.apps.enterprise.crm import service as crm_service
 from custops.apps.orchestrator.graph import NodeSet
 from custops.domain.models.approval import Approval, ApprovalStatus
 from custops.domain.models.billing import Subscription
+from custops.domain.policies.retrieval import RetrievalPolicy
 from custops.domain.policies.thresholds import ApprovalPolicy
 from custops.mcp.permissions.matrix import Role, ToolName
 from custops.mcp.tools import enterprise as handlers
@@ -114,6 +115,11 @@ class NodeDependencies:
     # decision from the same local rules, and records that it went unconsulted.
     billing_specialist: BillingSpecialistClient | None = None
     approval_policy: ApprovalPolicy | None = None
+    # The retrieval sufficiency threshold, which belongs to the embedding model
+    # rather than to the business rule. None keeps the production default; the
+    # integration suite supplies one calibrated to the deterministic double,
+    # whose scores sit on a different scale (see tests/integration/conftest.py).
+    retrieval_policy: RetrievalPolicy | None = None
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
 
 
@@ -357,7 +363,7 @@ def build_nodes(deps: NodeDependencies) -> NodeSet:
                     ),
                     account_id=account_id,
                 ),
-                handlers.make_search_knowledge(deps.embedder),
+                handlers.make_search_knowledge(deps.embedder, deps.retrieval_policy),
             )
 
             sufficient = False

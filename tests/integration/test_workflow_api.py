@@ -35,6 +35,7 @@ from tests.integration.conftest import (
     bearer,
     issue_test_token,
     requires_postgres,
+    use_test_retrieval_policy,
 )
 
 pytestmark = [pytest.mark.integration, requires_postgres]
@@ -83,6 +84,7 @@ async def client(seeded: Database, runtime_settings: Settings) -> AsyncIterator[
     production uses (§17). There is no authentication-disabled test mode.
     """
     app: FastAPI = create_app(settings=runtime_settings)
+    use_test_retrieval_policy(app)
     app.dependency_overrides[get_chat_provider] = lambda: _chat()
 
     token = await issue_test_token(seeded, email=OPERATOR_EMAIL)
@@ -259,6 +261,7 @@ class TestApprovalPause:
     ) -> None:
         """Umbrella's 35% discount trips the approval threshold (§13)."""
         app = create_app(settings=runtime_settings)
+        use_test_retrieval_policy(app)
         app.dependency_overrides[get_chat_provider] = lambda: _chat(customer_ref="UMBRELLA")
 
         async with (
@@ -286,6 +289,7 @@ class TestApprovalPause:
     ) -> None:
         """Otherwise a paused run is indistinguishable from a completed one."""
         app = create_app(settings=runtime_settings)
+        use_test_retrieval_policy(app)
         app.dependency_overrides[get_chat_provider] = lambda: _chat(customer_ref="UMBRELLA")
 
         async with (
@@ -314,6 +318,7 @@ class TestEscalation:
     ) -> None:
         """Globex's term-locked contract stops the run before any mutation."""
         app = create_app(settings=runtime_settings)
+        use_test_retrieval_policy(app)
         app.dependency_overrides[get_chat_provider] = lambda: _chat(customer_ref="GLOBEX")
 
         async with (

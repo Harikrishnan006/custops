@@ -21,6 +21,7 @@ from custops.apps.enterprise.billing import service as billing_service
 from custops.apps.enterprise.contracts import service as contract_service
 from custops.apps.enterprise.crm import service as crm_service
 from custops.apps.enterprise.support import service as support_service
+from custops.domain.policies.retrieval import RetrievalPolicy
 from custops.knowledge.retrieval.search import retrieve_evidence
 from custops.mcp.tools.results import ToolErrorCode, ToolExecutionError
 from custops.mcp.tools.runtime import ToolContext
@@ -170,12 +171,23 @@ SearchKnowledgeHandler = Callable[
 ]
 
 
-def make_search_knowledge(provider: EmbeddingProvider) -> SearchKnowledgeHandler:
-    """Bind an embedding provider into the search handler.
+def make_search_knowledge(
+    provider: EmbeddingProvider, policy: RetrievalPolicy | None = None
+) -> SearchKnowledgeHandler:
+    """Bind an embedding provider — and its sufficiency policy — into the handler.
 
     A closure rather than a global: the provider is chosen by configuration and
     must be injectable in tests, and a module-level provider would embed a
     process-wide singleton into every call site.
+
+    ``policy`` travels with the provider because a similarity threshold is a
+    property of the *embedding model*, not of the business rule. ``None`` means
+    the production default (``RetrievalPolicy()``, minimum similarity 0.35),
+    which is correct for a real embedding model. A different provider — the
+    deterministic lexical double, say — produces scores on a different scale and
+    needs a threshold calibrated to it, or the gate reads every result as
+    insufficient. What must never change is the *shape* of the gate: weak
+    evidence escalates.
     """
 
     async def search_knowledge(
@@ -187,6 +199,7 @@ def make_search_knowledge(provider: EmbeddingProvider) -> SearchKnowledgeHandler
             arguments.query,
             limit=arguments.limit,
             account_id=arguments.account_id,
+            policy=policy,
         )
         return SearchKnowledgeOutput(
             query=evidence.query,
