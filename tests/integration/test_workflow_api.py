@@ -112,16 +112,26 @@ class TestStartingAWorkflow:
     async def test_the_run_reaches_validation_and_reports_the_divergence(
         self, client: AsyncClient
     ) -> None:
-        """The D8 failure, surfaced through the API.
+        """The D8 divergence, surfaced through the API.
 
-        Billing and the CRM accept the change; nothing provisions the
-        entitlement until Phase 8, so the workflow refuses to report success.
+        Billing and the CRM accept the change. This app configures no
+        provisioning client, so the portal is never consulted and the
+        entitlement check reports `needs_review` — `validation.py` is explicit
+        that a system which could not be read is "I could not tell", and that it
+        "never rounds up to 'fine'".
+
+        The expectation used to be `fail`, from before Phase 8 existed: back
+        then nothing drove the portal at all, so an unflipped entitlement was a
+        genuine mismatch. Once the portal became readable, an *unread* one
+        stopped being evidence of a wrong tier and became an unverified one.
+        Either way the property that matters is unchanged and asserted below —
+        the run must not report success on two agreeing systems.
         """
         response = await client.post("/workflows", json={"request": "Upgrade Acme to Enterprise."})
         body = response.json()
 
         verdicts = {r["check"]: r["verdict"] for r in body["validation_results"]}
-        assert verdicts.get("entitlement_tier") == "fail"
+        assert verdicts.get("entitlement_tier") == "needs_review"
         assert body["status"] != WorkflowStatus.COMPLETED
 
     async def test_evidence_is_returned_as_citations_only(self, client: AsyncClient) -> None:
