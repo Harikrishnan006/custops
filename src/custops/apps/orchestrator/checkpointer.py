@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from time import perf_counter
 from typing import Any
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -79,8 +80,39 @@ async def open_checkpointer(
     conn_string = settings.postgres.libpq_dsn()
 
     logger.info("checkpointer_selected", kind="postgres", database=settings.postgres.db)
+
+    # Timing, not ceremony. Three integration tests hang for their full 120s
+    # between `checkpointer_selected` and the run finishing, and the two
+    # candidates — acquiring the psycopg connection, and the setup DDL — are
+    # indistinguishable from the outside. These are structured logs rather than
+    # audit events; the §16 taxonomy stays at 19.
+    #
+    # Read them as a discriminator: neither line means the connection never came
+    # back, the first alone means `setup()` is blocking, and both mean the stall
+    # is further in, after the checkpointer was ready.
+    connect_started = perf_counter()
     async with AsyncPostgresSaver.from_conn_string(conn_string) as saver:
+        logger.info(
+            "checkpointer_connected",
+            elapsed_ms=round((perf_counter() - connect_started) * 1000, 1),
+        )
+
         # Creates the checkpointer's own tables if absent. Idempotent, and owned
         # by the library rather than by our Alembic history.
+        setup_started = perf_counter()
         await saver.setup()
-        yield saver
+        logger.info(
+            "checkpointer_setup_completed",
+            elapsed_ms=round((perf_counter() - setup_started) * 1000, 1),
+        )
+
+        ready_at = perf_counter()
+        try:
+            yield saver
+        finally:
+            # How long the caller held it — separates "the checkpointer was slow"
+            # from "the graph run itself was".
+            logger.info(
+                "checkpointer_released",
+                elapsed_ms=round((perf_counter() - ready_at) * 1000, 1),
+            )
