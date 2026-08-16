@@ -15,21 +15,78 @@ not text.
 - **Full specification:** [docs/BUILD_SPEC.md](docs/BUILD_SPEC.md)
 - **Decisions:** [docs/decisions/](docs/decisions/)
 
-> ### Current status: Phases 1–3 of 14 complete
+> ### Current status: all 14 phases merged, `main` green
 >
-> **Phase 1** — foundation: configuration, structured logging, database,
-> migrations, health checking.
-> **Phase 2** — domain model, deterministic business rules (pricing, eligibility,
-> approval thresholds), the enterprise systems of record, and seed data.
-> **Phase 3** — model provider abstraction, document ingestion and chunking,
-> pgvector retrieval, and the Evidence model.
+> **864 tests** — 703 unit, 154 integration, 7 end-to-end — across **6 CI jobs**
+> (lint/types, unit, integration, end-to-end, packaging, image/compose) plus a
+> separate evaluation-gate workflow. The integration job runs against a real
+> `pgvector/pgvector:0.8.6-pg17` service container and Redis; the end-to-end job
+> drives real Chromium.
 >
-> There are no agents, no LangGraph, no MCP tools and no workflows yet — they
-> arrive in their own phases and are deliberately absent rather than stubbed.
-> Per-phase reports, including what is verified and what is not, are in
-> [docs/PHASE-01-COMPLETION.md](docs/PHASE-01-COMPLETION.md),
-> [docs/PHASE-02-COMPLETION.md](docs/PHASE-02-COMPLETION.md) and
-> [docs/PHASE-03-COMPLETION.md](docs/PHASE-03-COMPLETION.md).
+> Per-phase reports, each stating what is verified and what is not:
+> [01](docs/PHASE-01-COMPLETION.md) · [02](docs/PHASE-02-COMPLETION.md) ·
+> [03](docs/PHASE-03-COMPLETION.md) · [04](docs/PHASE-04-COMPLETION.md) ·
+> [05](docs/PHASE-05-COMPLETION.md) · [06](docs/PHASE-06-COMPLETION.md) ·
+> [07](docs/PHASE-07-COMPLETION.md) · [08](docs/PHASE-08-COMPLETION.md) ·
+> [09](docs/PHASE-09-COMPLETION.md) · [10](docs/PHASE-10-COMPLETION.md) ·
+> [11](docs/PHASE-11-COMPLETION.md) · [12](docs/PHASE-12-COMPLETION.md) ·
+> [13](docs/PHASE-13-COMPLETION.md) · [14](docs/PHASE-14-COMPLETION.md)
+
+---
+
+## What CustOps is
+
+A request like the one above becomes a **stateful, resumable, audited workflow**
+rather than a paragraph of generated text.
+
+- **Orchestration — LangGraph.** A ten-node state machine: supervisor → planner →
+  research → decide → approval gate → execute → validate → notify, with escalate
+  and complete as terminal states. Routing is pure Python over workflow state; no
+  model decides where the graph goes next.
+- **Enterprise access — MCP.** Agents reach billing, the CRM, pricing, invoices,
+  support history and the knowledge base only through Model Context Protocol
+  tools, each bound to a role in a permission matrix. There is no path from an
+  agent to raw SQL.
+- **Specialist consultation — A2A.** A billing specialist runs as a genuinely
+  separate process, discovered by agent card and reached over a socket. It may
+  read and advise; it can neither approve nor mutate.
+- **Durability — PostgreSQL checkpointing.** A run interrupted at the approval
+  gate is checkpointed, so it survives a process restart and can wait for a human
+  indefinitely. Resuming continues the same execution rather than replaying it.
+- **Evidence — pgvector retrieval.** Policies and contracts are chunked, embedded
+  and searched with an HNSW index. A decision made on evidence that scored below
+  the confidence threshold escalates instead of proceeding.
+- **Legacy systems — Playwright.** One system of record has no API, so it is
+  driven through a real browser — behind the same MCP permission boundary as
+  every other tool.
+- **Approval — enforced in three places.** The graph will not route past the gate,
+  the API records the human decision, and the MCP tool independently re-verifies
+  an approval record before it mutates anything. The check is deliberately not
+  in the agent.
+- **Validation — cross-system.** After execution the validator re-reads each
+  system of record and compares against intent. Agreement between two systems is
+  not success if the third cannot be confirmed: unreadable is `NEEDS_REVIEW`, and
+  disagreement escalates.
+
+Architecture in depth: [docs/architecture/overview.md](docs/architecture/overview.md).
+Contested decisions: [docs/decisions/](docs/decisions/) (7 ADRs).
+
+---
+
+## What is and isn't wired
+
+Stated plainly, because the difference matters when reading the code or the CI
+output.
+
+| Area | Status |
+|---|---|
+| Model provider | **No live LLM adapter.** Every run uses `DeterministicChatProvider`, a fixed schema-valid responder. No Anthropic, OpenAI or other API is called; no such SDK is a dependency. The `ChatProvider` protocol is the seam an adapter would implement. |
+| Redis | **Present but stores nothing.** It is constructed and health-checked; no code writes to it. It is not caching, queueing or session storage — see [ADR-003](docs/decisions/ADR-003-redis-role.md). Checkpoints live in PostgreSQL. |
+| Container image | **Never built.** `infrastructure/docker/api.Dockerfile` and `docker-compose.yml` exist and CI validates `docker compose config`, but no CI job builds or publishes the image. |
+| Completed workflows | **Not demonstrated over HTTP in CI.** The integration job runs no legacy portal, so the entitlement step cannot be confirmed and validation correctly declines to report success. The full billing → CRM → portal → validation-`PASS` chain is verified at node level against a stub portal. |
+| Evaluation judge | AgentForge supports an LLM judge; CI deliberately never uses it. Scoring in CI is entirely deterministic. |
+
+Everything else described on this page is exercised by the test suite.
 
 ---
 
@@ -104,8 +161,8 @@ CREATE DATABASE custops OWNER custops;
 
 `CREATE EXTENSION vector` is run by the migration, not by hand — but it needs
 sufficient privilege, so either grant the role superuser locally or run
-migrations as a superuser. (Splitting the migration role from a least-privilege
-application role is Phase 13 work.)
+migrations as a superuser. Splitting the migration role from a least-privilege
+application role is not implemented; both still use one role.
 
 ### 2. Redis
 
@@ -188,8 +245,8 @@ Interactive API docs: <http://localhost:8000/docs>
 
 ### Inspecting the systems of record
 
-Read-only views onto the seeded data. Useful for seeing the deterministic layer
-work before any agent exists:
+Read-only views onto the seeded data. Useful for seeing the deterministic
+business rules in isolation, without starting a workflow:
 
 ```bash
 curl "http://localhost:8000/enterprise/customers/ACME"
@@ -231,18 +288,27 @@ Start a run. The `ops.approver` user holds the `operator` role, which is what
 starting a workflow requires — it reaches billing, CRM and the legacy portal:
 
 ```bash
-curl -X POST http://localhost:8000/workflows   -H "Authorization: Bearer $CUSTOPS_TOKEN"   -H "Content-Type: application/json"   -d '{"request": "Upgrade ACME to the enterprise plan."}'
+curl -X POST http://localhost:8000/workflows \
+  -H "Authorization: Bearer $CUSTOPS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"request": "Upgrade ACME to the enterprise plan."}'
 ```
 
-`201` means it ran to completion. **`202` means it paused for a human** — the
-graph hit the approval gate and interrupted. Try `UMBRELLA`, whose 35% discount
-trips the threshold.
+**`202` means it paused for a human** — the graph reached the approval gate and
+interrupted. Try `UMBRELLA`, whose 35% discount trips the threshold.
+
+**`201` means the run reached a terminal state without pausing** — it is *not* a
+claim that the upgrade succeeded. Read `status` in the body for that:
+`completed` is one outcome, `escalated` is another, and both return 201. A run
+whose validation could not confirm every system of record escalates rather than
+reporting success.
 
 Reconstruct the full trace afterwards — graph steps, tool calls and audit events
 merged into one ordered timeline:
 
 ```bash
-curl -H "Authorization: Bearer $CUSTOPS_TOKEN"   "http://localhost:8000/workflows/<execution_id>"
+curl -H "Authorization: Bearer $CUSTOPS_TOKEN" \
+  "http://localhost:8000/workflows/<execution_id>"
 ```
 
 ### Approving a paused run
@@ -251,11 +317,15 @@ List what is waiting, then decide. Note the decision body carries **no
 identity** — who approved comes from the token, never from the request:
 
 ```bash
-curl -H "Authorization: Bearer $CUSTOPS_TOKEN"   "http://localhost:8000/approvals?status=pending"
+curl -H "Authorization: Bearer $CUSTOPS_TOKEN" \
+  "http://localhost:8000/approvals?status=pending"
 ```
 
 ```bash
-curl -X POST "http://localhost:8000/approvals/<approval_id>/decision"   -H "Authorization: Bearer $CUSTOPS_TOKEN"   -H "Content-Type: application/json"   -d '{"approved": true, "note": "Checked the contract."}'
+curl -X POST "http://localhost:8000/approvals/<approval_id>/decision" \
+  -H "Authorization: Bearer $CUSTOPS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"approved": true, "note": "Checked the contract."}'
 ```
 
 High-value upgrades need `finance.approver@custops.example.com`; a plain
@@ -280,12 +350,16 @@ uv run pytest
 uv run ruff check . ; uv run ruff format --check . ; uv run mypy
 ```
 
-**Skipped tests are expected without live services.** Integration tests probe
-PostgreSQL and Redis and skip with the precise blocker named, rather than
-failing — a skip reports "not exercised", while a failure would claim the code
-is broken. Without services you should see roughly `650 passed, 160 skipped`;
-CI runs the skipped ones against a real `pgvector/pgvector:0.8.6-pg17` service
-container.
+**Skipped tests are expected without live services.** Integration and end-to-end
+tests probe their dependencies and skip with the precise blocker named, rather
+than failing — a skip reports "not exercised", while a failure would claim the
+code is broken.
+
+The suite is **864 tests**: 703 unit (no infrastructure), 154 integration
+(PostgreSQL with pgvector, Redis) and 7 end-to-end (Chromium). Locally, without
+services, the unit layer runs and the rest skip. CI runs all three, plus lint and
+types, packaging, and compose validation — 6 jobs, with the evaluation gate as a
+separate workflow.
 
 The evaluation regression gate is separate, and deterministic — the LLM judge is
 never used in CI, because a build check that fails when an API call times out is
@@ -350,16 +424,37 @@ Set `LOG_FORMAT=console` for readable local logs; leave it `json` anywhere else.
 ## Layout
 
 ```
-src/custops/         application code (see ADR-001 for why it is not at the root)
-  apps/api/          FastAPI app, routers, schemas, middleware
-  cache/             Redis client and probe
-  db/                declarative base, engine, session factory
-  domain/models/     SQLAlchemy models
-  observability/     logging, correlation context, event catalogue, probes
-  config.py          the entire configuration surface
-migrations/          Alembic (async)
-tests/unit/          no infrastructure required
-tests/integration/   requires live PostgreSQL / Redis; skips when absent
-infrastructure/      Dockerfile, entrypoint
-docs/                architecture, decisions, phase reports
+src/custops/               application code (ADR-001 explains why not at the root)
+  agents/                  graph nodes, routing, state, schemas, budgets
+  apps/api/                FastAPI app, routers, schemas, middleware, security
+  apps/orchestrator/       graph assembly, workflow runner, checkpointer
+  apps/enterprise/         read-only HTTP views onto the systems of record
+  apps/billing_specialist/ the A2A specialist, run as its own process
+  apps/legacy_portal/      the no-API portal that Playwright drives
+  mcp/server/              MCP server and tool registration
+  mcp/tools/               tool handlers, approval verification, results
+  mcp/permissions/         tool/role permission matrix
+  a2a/client/              specialist client
+  a2a/contracts/           agent card and pricing contracts
+  knowledge/ingestion/     chunking and embedding pipeline
+  knowledge/retrieval/     pgvector search
+  domain/models/           SQLAlchemy models
+  domain/rules/            deterministic eligibility and pricing
+  domain/policies/         retrieval, approval authority, budgets
+  providers/               chat and embedding providers
+  provisioning/            Playwright client and provisioning contracts
+  evaluation/              AgentForge adapter, runner, golden datasets
+  observability/           logging, correlation context, event catalogue, probes
+  cache/                   Redis client and probe
+  db/                      declarative base, engine, session factory
+  cli.py                   operator commands
+  config.py                the entire configuration surface
+migrations/                Alembic (async), 7 revisions
+tests/unit/                no infrastructure required
+tests/integration/         requires PostgreSQL / Redis; skips when absent
+tests/e2e/                 requires Chromium and the portal; skips when absent
+benchmarks/                orchestration-framework comparison (dev only)
+evaluation/baseline/       committed regression baseline for the gate
+infrastructure/docker/     api.Dockerfile, entrypoint.sh
+docs/                      architecture, decisions, phase reports
 ```
