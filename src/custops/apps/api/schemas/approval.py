@@ -7,7 +7,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ApprovalOut(BaseModel):
@@ -42,14 +42,16 @@ class ApprovalOut(BaseModel):
 class ApprovalDecisionRequest(BaseModel):
     """A human's decision.
 
-    ``actor_user_id`` identifies who decided. **It is asserted, not proven** —
-    authentication arrives in Phase 13. Until then this endpoint enforces
-    *authorisation* (does this user hold an approving role?) but cannot verify
-    identity, and the audit trail is only as trustworthy as the caller.
+    **Carries no identity.** Who decided comes from the bearer token's
+    principal, and `model_config` forbids extra fields so a client that still
+    sends ``actor_user_id`` is rejected outright rather than having it silently
+    ignored — a caller who believes they are choosing the actor should be told
+    they are not.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     approved: bool
-    actor_user_id: uuid.UUID
     note: str | None = Field(default=None, max_length=1000)
 
 

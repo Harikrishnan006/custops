@@ -30,7 +30,12 @@ from custops.domain.seed import clear_seed_data, seed_all
 from custops.knowledge.ingestion.pipeline import ingest_contracts, ingest_policies
 from custops.providers.chat import DeterministicChatProvider
 from custops.providers.deterministic import DeterministicEmbeddingProvider
-from tests.integration.conftest import requires_postgres
+from tests.integration.conftest import (
+    OPERATOR_EMAIL,
+    bearer,
+    issue_test_token,
+    requires_postgres,
+)
 
 pytestmark = [pytest.mark.integration, requires_postgres]
 
@@ -72,13 +77,23 @@ async def seeded(database: Database) -> AsyncIterator[Database]:
 
 @pytest.fixture
 async def client(seeded: Database, runtime_settings: Settings) -> AsyncIterator[AsyncClient]:
-    """The real app, with only the model swapped for the deterministic double."""
+    """The real app, with only the model swapped for the deterministic double.
+
+    Authenticated as the seeded operator, through the same dependency
+    production uses (§17). There is no authentication-disabled test mode.
+    """
     app: FastAPI = create_app(settings=runtime_settings)
     app.dependency_overrides[get_chat_provider] = lambda: _chat()
 
+    token = await issue_test_token(seeded, email=OPERATOR_EMAIL)
+
     async with (
         app.router.lifespan_context(app),
-        AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as http_client,
+        AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://testserver",
+            headers=bearer(token),
+        ) as http_client,
     ):
         yield http_client
 

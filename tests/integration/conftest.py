@@ -135,3 +135,70 @@ async def live_client(live_app: FastAPI) -> AsyncIterator[AsyncClient]:
         base_url="http://testserver",
     ) as http_client:
         yield http_client
+
+
+# ---------------------------------------------------------------------------
+# Authentication (§17, Phase 13)
+# ---------------------------------------------------------------------------
+# Every protected endpoint requires a bearer token. Tests authenticate through
+# the *same* dependency production uses — there is deliberately no
+# "authentication disabled in test" switch, because a bypass flag is precisely
+# the thing that eventually ships enabled.
+#
+# Tokens are minted here and inserted as hashes, exactly as `custops issue-token`
+# does. No credential is committed to the repository; the plaintext exists only
+# for the lifetime of the test that uses it.
+
+OPERATOR_EMAIL = "ops.approver@custops.example.com"
+FINANCE_EMAIL = "finance.approver@custops.example.com"
+VIEWER_EMAIL = "viewer@custops.example.com"
+
+
+async def issue_test_token(database: Database, *, email: str, label: str = "test") -> str:
+    """Mint a real credential for a seeded user and return the plaintext."""
+    from custops.apps.api.security.issuance import issue
+
+    async with database.session_factory() as session:
+        issued = await issue(session, email=email, label=label)
+        await session.commit()
+    return issued.plaintext
+
+
+def bearer(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+async def authenticated_client(
+    app: FastAPI, database: Database, *, email: str
+) -> AsyncClient:
+    """An HTTP client carrying a real token for one seeded user."""
+    token = await issue_test_token(database, email=email)
+    return AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+        headers=bearer(token),
+    )
+
+
+@pytest.fixture
+async def operator_client(live_app: FastAPI, database: Database) -> AsyncIterator[AsyncClient]:
+    """Holds `operator` and `approver` — may start workflows and approve routine ones."""
+    client = await authenticated_client(live_app, database, email=OPERATOR_EMAIL)
+    async with client:
+        yield client
+
+
+@pytest.fixture
+async def finance_client(live_app: FastAPI, database: Database) -> AsyncIterator[AsyncClient]:
+    """Holds `finance_approver` — elevated approval authority, no operator role."""
+    client = await authenticated_client(live_app, database, email=FINANCE_EMAIL)
+    async with client:
+        yield client
+
+
+@pytest.fixture
+async def viewer_client(live_app: FastAPI, database: Database) -> AsyncIterator[AsyncClient]:
+    """Read-only. Used to prove that reading and acting are genuinely separate."""
+    client = await authenticated_client(live_app, database, email=VIEWER_EMAIL)
+    async with client:
+        yield client

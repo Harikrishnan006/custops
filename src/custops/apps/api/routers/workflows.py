@@ -34,6 +34,10 @@ from custops.apps.api.schemas.workflow import (
     WorkflowRunOut,
     WorkflowTraceOut,
 )
+from custops.apps.api.security.principal import (
+    ReadWorkflowPrincipal,
+    StartWorkflowPrincipal,
+)
 from custops.apps.enterprise.router import get_session
 from custops.apps.orchestrator.runner import RunOutcome, WorkflowRunner
 from custops.config import Settings, get_settings
@@ -42,9 +46,12 @@ from custops.domain.models.approval import ToolCall
 from custops.domain.models.audit import AuditEvent
 from custops.domain.models.workflow import WorkflowExecution, WorkflowStep
 from custops.observability.events import WORKFLOW_EVENT_NAMES
+from custops.observability.logging import get_logger
 from custops.observability.redaction import redact
 from custops.observability.trace import build_timeline, event_coverage
 from custops.providers.chat import ChatProvider, DeterministicChatProvider
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
 
@@ -81,12 +88,14 @@ async def start_workflow(
     payload: StartWorkflowRequest,
     response: Response,
     runner: Annotated[WorkflowRunner, Depends(get_runner)],
+    principal: StartWorkflowPrincipal,
 ) -> WorkflowRunOut:
     """Run a request end to end, returning when it completes or pauses.
 
     Synchronous by design: the graph interrupts rather than blocking on a human,
     so the request only ever waits for the automated portion (see runner.py).
     """
+    logger.info("workflow_start_requested", user_id=str(principal.user_id))
     outcome = await runner.start(raw_request=payload.request, request_id=payload.request_id)
     if outcome.paused:
         response.status_code = status.HTTP_202_ACCEPTED
@@ -98,7 +107,11 @@ async def start_workflow(
     response_model=WorkflowTraceOut,
     summary="Reconstruct a full execution trace",
 )
-async def get_workflow_trace(execution_id: uuid.UUID, session: SessionDep) -> WorkflowTraceOut:
+async def get_workflow_trace(
+    execution_id: uuid.UUID,
+    session: SessionDep,
+    principal: ReadWorkflowPrincipal,
+) -> WorkflowTraceOut:
     """Everything recorded under one execution_id (§16).
 
     Joins three independently written records — graph steps, tool calls and
@@ -213,6 +226,7 @@ async def get_workflow_trace(execution_id: uuid.UUID, session: SessionDep) -> Wo
 @router.get("", response_model=list[WorkflowTraceOut], summary="List recent runs")
 async def list_workflows(
     session: SessionDep,
+    principal: ReadWorkflowPrincipal,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> list[WorkflowTraceOut]:
     """Recent runs, newest first, without their step detail.

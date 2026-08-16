@@ -92,7 +92,7 @@ async def _load_record(database: Database, execution_id: uuid.UUID) -> Execution
 
 class TestTheAdapterOnARealExecution:
     async def test_a_real_run_converts_to_a_scorable_trace(
-        self, seeded: Database, live_client: object
+        self, seeded: Database, operator_client: object
     ) -> None:
         """End to end: run the workflow, read the trace, score it.
 
@@ -101,9 +101,9 @@ class TestTheAdapterOnARealExecution:
         """
         from httpx import AsyncClient
 
-        assert isinstance(live_client, AsyncClient)
+        assert isinstance(operator_client, AsyncClient)
 
-        started = await live_client.post(
+        started = await operator_client.post(
             "/workflows", json={"raw_request": "Upgrade ACME to enterprise."}
         )
         assert started.status_code in (200, 201, 202), started.text
@@ -120,13 +120,13 @@ class TestTheAdapterOnARealExecution:
         assert all(isinstance(step.type, StepType) for step in trace.steps)
 
     async def test_real_tool_calls_appear_as_call_and_result_pairs(
-        self, seeded: Database, live_client: object
+        self, seeded: Database, operator_client: object
     ) -> None:
         from httpx import AsyncClient
 
-        assert isinstance(live_client, AsyncClient)
+        assert isinstance(operator_client, AsyncClient)
 
-        started = await live_client.post(
+        started = await operator_client.post(
             "/workflows", json={"raw_request": "Upgrade ACME to enterprise."}
         )
         execution_id = uuid.UUID(started.json()["execution_id"])
@@ -144,15 +144,15 @@ class TestTheAdapterOnARealExecution:
         assert trace.tool_sequence == [step.tool_name for step in calls]
 
     async def test_a_real_trace_scores_through_agentforge(
-        self, seeded: Database, live_client: object
+        self, seeded: Database, operator_client: object
     ) -> None:
         """The whole point: a genuine execution reaching the same scoring the
         gate applies to the synthetic set."""
         from httpx import AsyncClient
 
-        assert isinstance(live_client, AsyncClient)
+        assert isinstance(operator_client, AsyncClient)
 
-        started = await live_client.post(
+        started = await operator_client.post(
             "/workflows", json={"raw_request": "Upgrade ACME to enterprise."}
         )
         execution_id = uuid.UUID(started.json()["execution_id"])
@@ -169,14 +169,14 @@ class TestTheAdapterOnARealExecution:
         assert score.tool_hallucination is False
 
     async def test_a_real_trace_carries_no_chain_of_thought(
-        self, seeded: Database, live_client: object
+        self, seeded: Database, operator_client: object
     ) -> None:
         """Rule 18 across the whole pipeline, on real data rather than fixtures."""
         from httpx import AsyncClient
 
-        assert isinstance(live_client, AsyncClient)
+        assert isinstance(operator_client, AsyncClient)
 
-        started = await live_client.post(
+        started = await operator_client.post(
             "/workflows", json={"raw_request": "Upgrade ACME to enterprise."}
         )
         execution_id = uuid.UUID(started.json()["execution_id"])

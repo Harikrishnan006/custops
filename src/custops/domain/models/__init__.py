@@ -12,6 +12,7 @@ from custops.domain.models.approval import Approval, ToolCall
 from custops.domain.models.audit import AuditEvent
 from custops.domain.models.billing import Discount, Invoice, Payment, Plan, Subscription
 from custops.domain.models.contract import Contract, Policy
+from custops.domain.models.credential import ApiToken
 from custops.domain.models.customer import Account, Contact, Customer
 from custops.domain.models.entitlement import Entitlement
 from custops.domain.models.identity import Role, User, UserRole
@@ -21,6 +22,7 @@ from custops.domain.models.workflow import WorkflowExecution, WorkflowStep
 
 __all__ = [
     "Account",
+    "ApiToken",
     "Approval",
     "AuditEvent",
     "Contact",

@@ -34,7 +34,14 @@ from custops.domain.seed import clear_seed_data, seed_all, seed_id
 from custops.knowledge.ingestion.pipeline import ingest_contracts, ingest_policies
 from custops.providers.chat import DeterministicChatProvider
 from custops.providers.deterministic import DeterministicEmbeddingProvider
-from tests.integration.conftest import requires_postgres
+from tests.integration.conftest import (
+    FINANCE_EMAIL,
+    OPERATOR_EMAIL,
+    VIEWER_EMAIL,
+    bearer,
+    issue_test_token,
+    requires_postgres,
+)
 
 pytestmark = [pytest.mark.integration, requires_postgres]
 
@@ -84,14 +91,45 @@ async def seeded(database: Database) -> AsyncIterator[Database]:
 
 
 @pytest.fixture
-async def client(seeded: Database, runtime_settings: Settings) -> AsyncIterator[AsyncClient]:
-    app: FastAPI = create_app(settings=runtime_settings)
-    app.dependency_overrides[get_chat_provider] = lambda: _chat(NEEDS_APPROVAL)
+async def app(seeded: Database, runtime_settings: Settings) -> AsyncIterator[FastAPI]:
+    application: FastAPI = create_app(settings=runtime_settings)
+    application.dependency_overrides[get_chat_provider] = lambda: _chat(NEEDS_APPROVAL)
+    async with application.router.lifespan_context(application):
+        yield application
 
-    async with (
-        app.router.lifespan_context(app),
-        AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as http,
-    ):
+
+async def _client_for(app: FastAPI, database: Database, email: str) -> AsyncClient:
+    """A client authenticated as one seeded user (§17).
+
+    Identity now comes from the token, so "who is deciding" is expressed by
+    *which client* is used — not by a field in the request body.
+    """
+    token = await issue_test_token(database, email=email)
+    return AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+        headers=bearer(token),
+    )
+
+
+@pytest.fixture
+async def client(app: FastAPI, seeded: Database) -> AsyncIterator[AsyncClient]:
+    """The ops user: holds `operator` and `approver`."""
+    async with await _client_for(app, seeded, OPERATOR_EMAIL) as http:
+        yield http
+
+
+@pytest.fixture
+async def finance(app: FastAPI, seeded: Database) -> AsyncIterator[AsyncClient]:
+    """Elevated approval authority."""
+    async with await _client_for(app, seeded, FINANCE_EMAIL) as http:
+        yield http
+
+
+@pytest.fixture
+async def viewer(app: FastAPI, seeded: Database) -> AsyncIterator[AsyncClient]:
+    """Read-only: may see approvals, may not decide them."""
+    async with await _client_for(app, seeded, VIEWER_EMAIL) as http:
         yield http
 
 
@@ -147,60 +185,104 @@ class TestAuthorization:
 
         response = await client.post(
             f"/approvals/{approval_id}/decision",
-            json={"approved": True, "actor_user_id": str(OPS_APPROVER)},
+            json={"approved": True},
         )
 
         assert response.status_code == 200, response.text
         assert response.json()["approval"]["status"] == ApprovalStatus.APPROVED
 
-    async def test_a_user_without_an_approving_role_is_refused(self, client: AsyncClient) -> None:
+    async def test_a_user_without_an_approving_role_is_refused(
+        self, client: AsyncClient, viewer: AsyncClient
+    ) -> None:
+        """Refused at the endpoint now, before authority is even consulted.
+
+        Phase 13 moved this one check earlier: a viewer no longer reaches the
+        handler, so the denial is `insufficient_role` from the endpoint policy
+        rather than `no_approval_role` from the amount policy. Both refuse; the
+        earlier one refuses without touching the approval record at all.
+        """
         started = await _pause_a_workflow(client)
         approval_id = started["awaiting_approval"]["approval_id"]
 
-        response = await client.post(
-            f"/approvals/{approval_id}/decision",
-            json={"approved": True, "actor_user_id": str(VIEWER)},
+        response = await viewer.post(
+            f"/approvals/{approval_id}/decision", json={"approved": True}
         )
 
         assert response.status_code == 403
-        assert response.json()["detail"]["code"] == "no_approval_role"
+        assert response.json()["detail"]["code"] == "insufficient_role"
 
-    async def test_a_deactivated_approver_is_refused(self, client: AsyncClient) -> None:
-        """A role alone must not confer authority on a closed account."""
+    async def test_a_deactivated_approver_cannot_authenticate_at_all(
+        self, app: FastAPI, client: AsyncClient, seeded: Database
+    ) -> None:
+        """A closed account is stopped one layer earlier than before.
+
+        Previously this was a 403 on authority. Now a deactivated user cannot
+        authenticate, so the credential is refused before any approval logic
+        runs — and their existing tokens stop working without anyone having to
+        remember which ones they hold.
+
+        The token is inserted directly because `issue()` refuses to mint one for
+        an inactive user; the row is what an already-issued credential would
+        look like after the account was closed.
+        """
+        from custops.apps.api.security.tokens import mint
+        from custops.domain.models.credential import ApiToken
+
         started = await _pause_a_workflow(client)
         approval_id = started["awaiting_approval"]["approval_id"]
 
-        response = await client.post(
-            f"/approvals/{approval_id}/decision",
-            json={"approved": True, "actor_user_id": str(FORMER_APPROVER)},
-        )
+        minted = mint()
+        async with seeded.session_factory() as session:
+            session.add(
+                ApiToken(
+                    token_hash=minted.token_hash,
+                    label="former",
+                    user_id=FORMER_APPROVER,
+                )
+            )
+            await session.commit()
 
-        assert response.status_code == 403
-        assert response.json()["detail"]["code"] == "actor_inactive"
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://testserver",
+            headers=bearer(minted.plaintext),
+        ) as former:
+            response = await former.post(
+                f"/approvals/{approval_id}/decision", json={"approved": True}
+            )
 
-    async def test_an_unknown_actor_is_refused(self, client: AsyncClient) -> None:
+        assert response.status_code == 401
+
+    async def test_an_unknown_credential_is_refused(
+        self, app: FastAPI, client: AsyncClient
+    ) -> None:
+        """There is no longer any way to name an actor that does not exist.
+
+        Identity comes from a token, so the equivalent attack is presenting a
+        token nobody issued — refused at authentication with a 401.
+        """
         started = await _pause_a_workflow(client)
         approval_id = started["awaiting_approval"]["approval_id"]
 
-        response = await client.post(
-            f"/approvals/{approval_id}/decision",
-            json={"approved": True, "actor_user_id": str(uuid.uuid4())},
-        )
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://testserver",
+            headers=bearer("custops_not_a_real_token"),
+        ) as impostor:
+            response = await impostor.post(
+                f"/approvals/{approval_id}/decision", json={"approved": True}
+            )
 
-        assert response.status_code == 403
-        assert response.json()["detail"]["code"] == "actor_not_found"
+        assert response.status_code == 401
 
     async def test_a_refused_decision_leaves_the_approval_pending(
-        self, client: AsyncClient, seeded: Database
+        self, client: AsyncClient, viewer: AsyncClient, seeded: Database
     ) -> None:
         """An unauthorised attempt must not alter the record."""
         started = await _pause_a_workflow(client)
         approval_id = uuid.UUID(started["awaiting_approval"]["approval_id"])
 
-        await client.post(
-            f"/approvals/{approval_id}/decision",
-            json={"approved": True, "actor_user_id": str(VIEWER)},
-        )
+        await viewer.post(f"/approvals/{approval_id}/decision", json={"approved": True})
 
         async with seeded.session_factory() as session:
             approval = await session.get(Approval, approval_id)
@@ -215,12 +297,12 @@ class TestReplayAndReuse:
         """Otherwise a rejection becomes an approval after the fact."""
         started = await _pause_a_workflow(client)
         approval_id = started["awaiting_approval"]["approval_id"]
-        body = {"approved": False, "actor_user_id": str(OPS_APPROVER)}
+        body = {"approved": False}
 
         first = await client.post(f"/approvals/{approval_id}/decision", json=body)
         second = await client.post(
             f"/approvals/{approval_id}/decision",
-            json={"approved": True, "actor_user_id": str(OPS_APPROVER)},
+            json={"approved": True},
         )
 
         assert first.status_code == 200
@@ -228,19 +310,18 @@ class TestReplayAndReuse:
         assert second.json()["detail"]["code"] == "already_decided"
 
     async def test_the_original_decision_survives_a_second_attempt(
-        self, client: AsyncClient, seeded: Database
+        self, client: AsyncClient, finance: AsyncClient, seeded: Database
     ) -> None:
+        """A second, more privileged approver cannot overturn the first.
+
+        Deliberately the finance approver: if seniority could reopen a settled
+        decision, "already decided" would mean "decided by someone junior".
+        """
         started = await _pause_a_workflow(client)
         approval_id = uuid.UUID(started["awaiting_approval"]["approval_id"])
 
-        await client.post(
-            f"/approvals/{approval_id}/decision",
-            json={"approved": False, "actor_user_id": str(OPS_APPROVER)},
-        )
-        await client.post(
-            f"/approvals/{approval_id}/decision",
-            json={"approved": True, "actor_user_id": str(FINANCE_APPROVER)},
-        )
+        await client.post(f"/approvals/{approval_id}/decision", json={"approved": False})
+        await finance.post(f"/approvals/{approval_id}/decision", json={"approved": True})
 
         async with seeded.session_factory() as session:
             approval = await session.get(Approval, approval_id)
@@ -264,7 +345,7 @@ class TestReplayAndReuse:
 
         response = await client.post(
             f"/approvals/{approval_id}/decision",
-            json={"approved": True, "actor_user_id": str(OPS_APPROVER)},
+            json={"approved": True},
         )
 
         assert response.status_code == 409
@@ -315,7 +396,7 @@ class TestResumeLoop:
         decision = (
             await client.post(
                 f"/approvals/{approval_id}/decision",
-                json={"approved": True, "actor_user_id": str(OPS_APPROVER)},
+                json={"approved": True},
             )
         ).json()
 
@@ -329,7 +410,7 @@ class TestResumeLoop:
 
         await client.post(
             f"/approvals/{approval_id}/decision",
-            json={"approved": False, "actor_user_id": str(OPS_APPROVER)},
+            json={"approved": False},
         )
         trace = (await client.get(f"/workflows/{execution_id}")).json()
 
@@ -351,7 +432,6 @@ class TestResumeLoop:
             f"/approvals/{approval_id}/decision",
             json={
                 "approved": True,
-                "actor_user_id": str(OPS_APPROVER),
                 "note": "Checked the discount against DIS-002.",
             },
         )
@@ -376,7 +456,7 @@ class TestAuditability:
 
         await client.post(
             f"/approvals/{approval_id}/decision",
-            json={"approved": True, "actor_user_id": str(OPS_APPROVER)},
+            json={"approved": True},
         )
 
         async with seeded.session_factory() as session:
@@ -402,7 +482,7 @@ class TestAuditability:
 
         await client.post(
             f"/approvals/{approval_id}/decision",
-            json={"approved": True, "actor_user_id": str(OPS_APPROVER)},
+            json={"approved": True},
         )
         trace = (await client.get(f"/workflows/{execution_id}")).json()
 
@@ -413,7 +493,7 @@ class TestNotFound:
     async def test_deciding_an_unknown_approval_is_a_404(self, client: AsyncClient) -> None:
         response = await client.post(
             f"/approvals/{uuid.uuid4()}/decision",
-            json={"approved": True, "actor_user_id": str(OPS_APPROVER)},
+            json={"approved": True},
         )
 
         assert response.status_code == 404

@@ -318,6 +318,9 @@ POLICIES: tuple[dict[str, Any], ...] = (
 # Three deliberately different actors: routine authority, elevated authority,
 # and a deactivated account that must be refused.
 SEED_ROLES: tuple[dict[str, str], ...] = (
+    # Starting a workflow reaches billing, CRM and the legacy portal, so it is
+    # its own role rather than something every approver happens to hold (§17).
+    {"name": "operator", "description": "May start customer-operations workflows."},
     {"name": "approver", "description": "May approve routine operations."},
     {"name": "finance_approver", "description": "May approve high-value operations."},
     {"name": "viewer", "description": "Read-only; carries no approval authority."},
@@ -329,7 +332,7 @@ SEED_USERS: tuple[dict[str, Any], ...] = (
         "email": "ops.approver@custops.example.com",
         "full_name": "Ops Approver",
         "is_active": True,
-        "roles": ("approver",),
+        "roles": ("operator", "approver"),
     },
     {
         "key": "finance",

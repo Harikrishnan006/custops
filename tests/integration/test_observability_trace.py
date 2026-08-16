@@ -188,29 +188,29 @@ class TestTheRecorderAgainstPostgres:
 
 
 class TestTheInspectionEndpoint:
-    async def test_a_missing_execution_is_a_404(self, live_client: object) -> None:
+    async def test_a_missing_execution_is_a_404(self, operator_client: object) -> None:
         from httpx import AsyncClient
 
-        assert isinstance(live_client, AsyncClient)
-        response = await live_client.get(f"/workflows/{uuid.uuid4()}")
+        assert isinstance(operator_client, AsyncClient)
+        response = await operator_client.get(f"/workflows/{uuid.uuid4()}")
 
         assert response.status_code == 404
 
     async def test_the_trace_exposes_a_merged_timeline(
-        self, seeded: Database, live_client: object
+        self, seeded: Database, operator_client: object
     ) -> None:
         """The unified representation §16 asks for."""
         from httpx import AsyncClient
 
-        assert isinstance(live_client, AsyncClient)
+        assert isinstance(operator_client, AsyncClient)
 
-        started = await live_client.post(
+        started = await operator_client.post(
             "/workflows", json={"raw_request": "Upgrade ACME to enterprise."}
         )
         assert started.status_code in (200, 201, 202), started.text
         execution_id = started.json()["execution_id"]
 
-        trace = await live_client.get(f"/workflows/{execution_id}")
+        trace = await operator_client.get(f"/workflows/{execution_id}")
 
         assert trace.status_code == 200
         body = trace.json()
@@ -220,23 +220,23 @@ class TestTheInspectionEndpoint:
         # for every execution regardless of how the run turned out.
         assert str(EventType.REQUEST_RECEIVED) in body["event_coverage"]["emitted"]
 
-    async def test_the_timeline_is_ordered(self, seeded: Database, live_client: object) -> None:
+    async def test_the_timeline_is_ordered(self, seeded: Database, operator_client: object) -> None:
         from httpx import AsyncClient
 
-        assert isinstance(live_client, AsyncClient)
+        assert isinstance(operator_client, AsyncClient)
 
-        started = await live_client.post(
+        started = await operator_client.post(
             "/workflows", json={"raw_request": "Upgrade ACME to enterprise."}
         )
         execution_id = started.json()["execution_id"]
 
-        body = (await live_client.get(f"/workflows/{execution_id}")).json()
+        body = (await operator_client.get(f"/workflows/{execution_id}")).json()
         timestamps = [entry["at"] for entry in body["timeline"]]
 
         assert timestamps == sorted(timestamps)
 
     async def test_the_endpoint_never_serves_chain_of_thought(
-        self, seeded: Database, live_client: object
+        self, seeded: Database, operator_client: object
     ) -> None:
         """The security requirement, checked at the boundary that discloses.
 
@@ -246,14 +246,14 @@ class TestTheInspectionEndpoint:
         """
         from httpx import AsyncClient
 
-        assert isinstance(live_client, AsyncClient)
+        assert isinstance(operator_client, AsyncClient)
 
-        started = await live_client.post(
+        started = await operator_client.post(
             "/workflows", json={"raw_request": "Upgrade ACME to enterprise."}
         )
         execution_id = started.json()["execution_id"]
 
-        raw = (await live_client.get(f"/workflows/{execution_id}")).text.lower()
+        raw = (await operator_client.get(f"/workflows/{execution_id}")).text.lower()
 
         for forbidden in ("chain_of_thought", "scratchpad", "inner_monologue", "raw_completion"):
             assert forbidden not in raw

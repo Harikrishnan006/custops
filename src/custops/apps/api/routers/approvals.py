@@ -10,10 +10,12 @@ write, then resume. The decision is committed **before** the workflow is
 resumed, so a crash between the two leaves a recorded decision and a resumable
 workflow rather than a workflow that acted on a decision nobody recorded.
 
-**Authentication is not implemented** (Phase 13). ``actor_user_id`` is asserted
-by the caller. Authorisation *is* enforced — the actor must exist, be active,
-and hold an approving role — but this endpoint cannot yet verify that the caller
-is who they claim to be, and the audit trail inherits that limit.
+**The actor comes from authentication** (Phase 13). It is the bearer token's
+principal, never a field in the request body — a caller can no longer claim to
+be the finance approver. Two checks apply in order: reaching this endpoint
+requires an approving role (``endpoint_authority``), and deciding *this* amount
+requires sufficient authority (``approval_authority``). The audit trail records
+the authenticated principal.
 """
 
 from __future__ import annotations
@@ -32,6 +34,10 @@ from custops.apps.api.schemas.approval import (
     ApprovalDecisionOut,
     ApprovalDecisionRequest,
     ApprovalOut,
+)
+from custops.apps.api.security.principal import (
+    DecideApprovalPrincipal,
+    ListApprovalsPrincipal,
 )
 from custops.apps.enterprise.router import get_session
 from custops.apps.orchestrator.runner import WorkflowRunner
@@ -86,6 +92,7 @@ def _to_out(approval: Approval) -> ApprovalOut:
 @router.get("", response_model=list[ApprovalOut], summary="List approval requests")
 async def list_approvals(
     session: SessionDep,
+    principal: ListApprovalsPrincipal,
     status_filter: Annotated[str | None, Query(alias="status", max_length=16)] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> list[ApprovalOut]:
@@ -123,6 +130,7 @@ async def decide_approval(
     session: SessionDep,
     runner: RunnerDep,
     policy: PolicyDep,
+    principal: DecideApprovalPrincipal,
 ) -> ApprovalDecisionOut:
     """Record the decision, then resume the paused run.
 
@@ -148,9 +156,12 @@ async def decide_approval(
         )
 
     # --- Authority: may this actor decide this? ----------------------------
+    # The authenticated principal, re-read for its current roles. Authentication
+    # already resolved them; re-reading costs one query and means a role revoked
+    # mid-session cannot approve on the strength of a stale token.
     actor = (
         await session.execute(
-            select(User).where(User.id == payload.actor_user_id).options(selectinload(User.roles))
+            select(User).where(User.id == principal.user_id).options(selectinload(User.roles))
         )
     ).scalar_one_or_none()
 
@@ -162,13 +173,12 @@ async def decide_approval(
         policy=policy,
     )
     if not authority.permitted:
-        # 403 rather than 401: the caller's identity is accepted (it is asserted,
-        # not authenticated — see the module docstring); what is refused is the
-        # authority to make this particular decision.
+        # 403, not 401: the caller authenticated successfully. What is refused
+        # is authority over *this amount* — re-authenticating would not help.
         logger.warning(
             "approval_decision_refused",
             approval_id=str(approval_id),
-            actor_user_id=str(payload.actor_user_id),
+            actor_user_id=str(principal.user_id),
             denial=authority.denial,
         )
         raise HTTPException(
@@ -180,14 +190,14 @@ async def decide_approval(
     decided_at = datetime.now(UTC)
     approval.status = ApprovalStatus.APPROVED if payload.approved else ApprovalStatus.REJECTED
     approval.decided_at = decided_at
-    approval.decided_by_user_id = payload.actor_user_id
+    approval.decided_by_user_id = principal.user_id
     approval.decision_note = payload.note
 
     await record_event(
         session,
         EventType.APPROVAL_RECEIVED,
         actor_type=ActorType.USER,
-        actor_id=str(payload.actor_user_id),
+        actor_id=str(principal.user_id),
         entity_type=approval.entity_type,
         entity_id=approval.entity_id,
         payload={
@@ -206,7 +216,7 @@ async def decide_approval(
         "approval_decided",
         approval_id=str(approval_id),
         approved=payload.approved,
-        actor_user_id=str(payload.actor_user_id),
+        actor_user_id=str(principal.user_id),
     )
 
     # --- Resume: the graph reads the decision back from the row above -------

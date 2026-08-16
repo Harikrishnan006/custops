@@ -23,6 +23,60 @@ from custops.providers.registry import get_embedding_provider
 logger = get_logger(__name__)
 
 
+async def _issue_token(*, email: str, label: str, ttl_days: int | None) -> int:
+    """Mint a credential and print it once.
+
+    Printed to stdout and nowhere else: not logged, not stored, not retrievable
+    afterwards. If the operator loses it they issue another and revoke this one
+    — which is the correct workflow for a credential nobody can read back.
+    """
+    from custops.apps.api.security.issuance import IssuanceError, issue
+
+    settings = get_settings()
+    database = create_database(settings)
+    try:
+        async with database.session_factory() as session:
+            try:
+                issued = await issue(session, email=email, label=label, ttl_days=ttl_days)
+            except IssuanceError as error:
+                print(f"error: {error}", file=sys.stderr)
+                return 2
+            await session.commit()
+
+        expiry = issued.expires_at.isoformat() if issued.expires_at else "never"
+        print(f"token_id : {issued.token_id}")
+        print(f"label    : {issued.label}")
+        print(f"expires  : {expiry}")
+        print()
+        print("Token (shown once — store it now):")
+        print(f"  {issued.plaintext}")
+        return 0
+    finally:
+        await database.dispose()
+
+
+async def _revoke_token(*, token_id: str) -> int:
+    """Withdraw a credential."""
+    import uuid as _uuid
+
+    from custops.apps.api.security.issuance import IssuanceError, revoke
+
+    settings = get_settings()
+    database = create_database(settings)
+    try:
+        async with database.session_factory() as session:
+            try:
+                changed = await revoke(session, token_id=_uuid.UUID(token_id))
+            except (IssuanceError, ValueError) as error:
+                print(f"error: {error}", file=sys.stderr)
+                return 2
+            await session.commit()
+        print("revoked" if changed else "already revoked")
+        return 0
+    finally:
+        await database.dispose()
+
+
 async def _seed(*, reset: bool) -> int:
     """Load the synthetic catalogue into the configured database."""
     settings = get_settings()
@@ -90,6 +144,21 @@ def main(argv: list[str] | None = None) -> int:
     # `evaluate` parses its own flags: the evaluation layer is a dev-time tool
     # whose dependency (agent-forge) is not installed in production, so it must
     # not be imported when the operator runs `seed` or `ingest`.
+    token_parser = subcommands.add_parser(
+        "issue-token", help="mint an API token for a user (printed once)"
+    )
+    token_parser.add_argument("--email", required=True, help="the user to issue to")
+    token_parser.add_argument("--label", required=True, help="a handle, e.g. 'ci' or 'laptop'")
+    token_parser.add_argument(
+        "--ttl-days",
+        type=int,
+        default=90,
+        help="lifetime in days; 0 issues a non-expiring token",
+    )
+
+    revoke_parser = subcommands.add_parser("revoke-token", help="withdraw an API token")
+    revoke_parser.add_argument("--token-id", required=True, help="the token's id, not the token")
+
     subcommands.add_parser(
         "evaluate",
         help="score the orchestrator against the §15 datasets and gate on regressions",
@@ -105,6 +174,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if arguments.command == "ingest":
         return asyncio.run(_ingest())
+
+    if arguments.command == "issue-token":
+        return asyncio.run(
+            _issue_token(
+                email=arguments.email,
+                label=arguments.label,
+                ttl_days=arguments.ttl_days or None,
+            )
+        )
+
+    if arguments.command == "revoke-token":
+        return asyncio.run(_revoke_token(token_id=arguments.token_id))
 
     if arguments.command == "evaluate":
         # Imported here, never at module scope: agent-forge is a dev dependency
