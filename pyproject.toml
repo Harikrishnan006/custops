@@ -45,6 +45,7 @@ dev = [
     "ruff>=0.8",
     "mypy>=1.13",
     "crewai>=1.6.1",
+    "agent-forge",
 ]
 
 [build-system]
@@ -114,8 +115,20 @@ module = ["asyncpg.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+# agent-forge v0.1.0 ships no py.typed marker, so mypy declines to read its
+# annotations even though the source is fully typed. Worth fixing in AgentForge
+# rather than working around here; until then this is the same accommodation
+# the project already makes for asyncpg. The evaluation layer is dev-only, so
+# no production module loses type coverage because of it.
+module = ["agent_forge.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 # Provider SDKs are optional at import time — the adapters import them lazily
 # and raise an actionable error when absent (see providers/*_provider.py), so
 # type-checking must not require them to be installed.
 module = ["openai.*", "google.*", "google.genai.*"]
 ignore_missing_imports = true
+
+[tool.uv.sources]
+agent-forge = { git = "https://github.com/Harikrishnan006/agent-forge", rev = "v0.1.0" }

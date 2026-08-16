@@ -1,0 +1,58 @@
+name: Evaluation gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  evaluate:
+    name: Regression gate (§15)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      # Installs the dev group, which is where agent-forge lives. Evaluation is
+      # not part of the production dependency set (§15, decision D10).
+      - name: Install
+        run: uv sync --all-groups
+
+      - name: Unit and evaluation tests
+        run: uv run pytest tests/unit -q
+
+      # Deterministic by construction: the LLM judge is never used in the gate.
+      # A build check that fails because an API call timed out is worse than no
+      # check at all.
+      - name: Evaluation regression gate
+        env:
+          # AgentForge writes runs to user state; the gate itself compares
+          # against the committed baseline, not this directory.
+          AGENT_FORGE_RUNS_DIR: ${{ runner.temp }}/agent-forge-runs
+        run: |
+          uv run custops evaluate \
+            --version "${GITHUB_SHA::7}" \
+            --baseline evaluation/baseline/trace_baseline.json \
+            --json-out evaluation-report.json
+
+      - name: Upload evaluation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evaluation-report
+          path: evaluation-report.json
+          if-no-files-found: ignore
+
+      - name: Lint and type-check
+        run: |
+          uv run ruff check src/ tests/ benchmarks/
+          uv run mypy --strict src/ tests/ benchmarks/

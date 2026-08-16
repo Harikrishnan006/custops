@@ -87,7 +87,16 @@ def main(argv: list[str] | None = None) -> int:
 
     subcommands.add_parser("ingest", help="embed policies and contracts for retrieval")
 
-    arguments = parser.parse_args(argv)
+    # `evaluate` parses its own flags: the evaluation layer is a dev-time tool
+    # whose dependency (agent-forge) is not installed in production, so it must
+    # not be imported when the operator runs `seed` or `ingest`.
+    subcommands.add_parser(
+        "evaluate",
+        help="score the orchestrator against the §15 datasets and gate on regressions",
+        add_help=False,
+    )
+
+    arguments, extra = parser.parse_known_args(argv)
 
     configure_logging(get_settings())
 
@@ -96,6 +105,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if arguments.command == "ingest":
         return asyncio.run(_ingest())
+
+    if arguments.command == "evaluate":
+        # Imported here, never at module scope: agent-forge is a dev dependency
+        # and a production install has no reason to fail importing the CLI.
+        from custops.evaluation.cli import run as run_evaluation
+
+        return run_evaluation(extra)
 
     # argparse's `required=True` makes this unreachable in practice; error()
     # is NoReturn, so there is nothing to return afterwards.

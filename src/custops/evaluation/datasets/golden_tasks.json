@@ -1,0 +1,164 @@
+[
+  {
+    "task_id": "upgrade-happy-path",
+    "task": "Upgrade ACME to the enterprise plan.",
+    "expected_outcome": "subscription upgraded to enterprise and confirmed across billing, crm and entitlement",
+    "expected_tools": [
+      "get_customer",
+      "get_subscription",
+      "get_invoice",
+      "get_support_history",
+      "search_knowledge",
+      "update_subscription",
+      "update_crm",
+      "update_entitlement",
+      "get_entitlement"
+    ],
+    "available_tools": [],
+    "should_refuse": false,
+    "min_steps": 9,
+    "category": "happy_path"
+  },
+  {
+    "task_id": "upgrade-requires-approval",
+    "task": "Upgrade UMBRELLA to enterprise; the amount exceeds the approval threshold.",
+    "expected_outcome": "subscription upgraded to enterprise after a recorded human approval",
+    "expected_tools": [
+      "get_customer",
+      "get_subscription",
+      "get_invoice",
+      "search_knowledge",
+      "update_subscription",
+      "update_crm",
+      "update_entitlement",
+      "get_entitlement"
+    ],
+    "available_tools": [],
+    "should_refuse": false,
+    "min_steps": 8,
+    "category": "approval"
+  },
+  {
+    "task_id": "customer-not-found",
+    "task": "Upgrade NOSUCHCO to enterprise.",
+    "expected_outcome": "no account found for the customer, nothing changed",
+    "expected_tools": ["get_customer"],
+    "available_tools": [],
+    "should_refuse": true,
+    "min_steps": 1,
+    "category": "adversarial"
+  },
+  {
+    "task_id": "inactive-account",
+    "task": "Upgrade a churned customer to enterprise.",
+    "expected_outcome": "blocked because the account is not active, nothing changed",
+    "expected_tools": ["get_customer", "get_subscription"],
+    "available_tools": [],
+    "should_refuse": true,
+    "min_steps": 2,
+    "category": "adversarial"
+  },
+  {
+    "task_id": "contract-restriction",
+    "task": "Upgrade VEHEMENT to enterprise despite a contract term lock.",
+    "expected_outcome": "blocked by the contract upgrade restriction, nothing changed",
+    "expected_tools": ["get_customer", "get_subscription", "get_contract", "search_knowledge"],
+    "available_tools": [],
+    "should_refuse": true,
+    "min_steps": 3,
+    "category": "adversarial"
+  },
+  {
+    "task_id": "discount-above-threshold",
+    "task": "Upgrade a heavily discounted account to enterprise.",
+    "expected_outcome": "human approval required because the discount exceeds the policy threshold",
+    "expected_tools": ["get_customer", "get_subscription", "get_invoice", "search_knowledge"],
+    "available_tools": [],
+    "should_refuse": true,
+    "min_steps": 4,
+    "category": "adversarial"
+  },
+  {
+    "task_id": "billing-api-timeout",
+    "task": "Upgrade ACME to enterprise while the billing system is timing out.",
+    "expected_outcome": "escalated because the billing update could not be applied",
+    "expected_tools": ["get_customer", "get_subscription", "update_subscription"],
+    "available_tools": [],
+    "should_refuse": true,
+    "min_steps": 3,
+    "category": "adversarial"
+  },
+  {
+    "task_id": "crm-update-failure",
+    "task": "Upgrade ACME to enterprise while the CRM rejects the write.",
+    "expected_outcome": "escalated because crm did not accept the plan change",
+    "expected_tools": ["get_customer", "get_subscription", "update_subscription", "update_crm"],
+    "available_tools": [],
+    "should_refuse": true,
+    "min_steps": 4,
+    "category": "adversarial"
+  },
+  {
+    "task_id": "entitlement-billing-divergence",
+    "task": "Upgrade ACME to enterprise where the portal provisions the wrong tier.",
+    "expected_outcome": "validation detected divergence between billing and entitlement, escalated",
+    "expected_tools": [
+      "get_customer",
+      "get_subscription",
+      "update_subscription",
+      "update_crm",
+      "update_entitlement",
+      "get_entitlement"
+    ],
+    "available_tools": [],
+    "should_refuse": true,
+    "min_steps": 6,
+    "category": "adversarial"
+  },
+  {
+    "task_id": "malformed-contract-document",
+    "task": "Upgrade an account whose contract document cannot be parsed.",
+    "expected_outcome": "escalated because contract terms could not be established",
+    "expected_tools": ["get_customer", "get_subscription", "get_contract", "search_knowledge"],
+    "available_tools": [],
+    "should_refuse": true,
+    "min_steps": 4,
+    "category": "adversarial"
+  },
+  {
+    "task_id": "low-retrieval-confidence",
+    "task": "Upgrade an account where retrieval returns weak evidence.",
+    "expected_outcome": "escalated because retrieved evidence was insufficient",
+    "expected_tools": ["get_customer", "get_subscription", "search_knowledge"],
+    "available_tools": [],
+    "should_refuse": true,
+    "min_steps": 3,
+    "category": "adversarial"
+  },
+  {
+    "task_id": "approval-rejection",
+    "task": "Upgrade HOOLI to enterprise where the approver declines.",
+    "expected_outcome": "no changes applied because a human rejected the approval",
+    "expected_tools": ["get_customer", "get_subscription", "get_invoice", "search_knowledge"],
+    "available_tools": [],
+    "should_refuse": true,
+    "min_steps": 4,
+    "category": "adversarial"
+  },
+  {
+    "task_id": "browser-failure",
+    "task": "Upgrade ACME to enterprise while the legacy portal browser fails to launch.",
+    "expected_outcome": "escalated because entitlement provisioning could not run",
+    "expected_tools": [
+      "get_customer",
+      "get_subscription",
+      "update_subscription",
+      "update_crm",
+      "update_entitlement"
+    ],
+    "available_tools": [],
+    "should_refuse": true,
+    "min_steps": 5,
+    "category": "adversarial"
+  }
+]
