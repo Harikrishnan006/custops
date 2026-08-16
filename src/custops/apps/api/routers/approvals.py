@@ -36,13 +36,13 @@ from custops.apps.api.schemas.approval import (
 from custops.apps.enterprise.router import get_session
 from custops.apps.orchestrator.runner import WorkflowRunner
 from custops.domain.models.approval import Approval, ApprovalStatus
-from custops.domain.models.audit import AuditEvent
 from custops.domain.models.identity import User
 from custops.domain.policies.approval_authority import (
     ApprovalAuthorityPolicy,
     check_authority,
     check_decidable,
 )
+from custops.observability.audit import record_event
 from custops.observability.events import ActorType, EventType
 from custops.observability.logging import get_logger
 
@@ -183,21 +183,22 @@ async def decide_approval(
     approval.decided_by_user_id = payload.actor_user_id
     approval.decision_note = payload.note
 
-    session.add(
-        AuditEvent(
-            execution_id=approval.execution_id,
-            event_type=EventType.APPROVAL_RECEIVED,
-            actor_type=ActorType.USER,
-            actor_id=str(payload.actor_user_id),
-            entity_type=approval.entity_type,
-            entity_id=approval.entity_id,
-            payload={
-                "approval_id": str(approval_id),
-                "action": approval.action,
-                "approved": payload.approved,
-                "decided_at": decided_at.isoformat(),
-            },
-        )
+    await record_event(
+        session,
+        EventType.APPROVAL_RECEIVED,
+        actor_type=ActorType.USER,
+        actor_id=str(payload.actor_user_id),
+        entity_type=approval.entity_type,
+        entity_id=approval.entity_id,
+        payload={
+            "approval_id": str(approval_id),
+            "action": approval.action,
+            "approved": payload.approved,
+            "decided_at": decided_at.isoformat(),
+        },
+        # Explicit: this endpoint records an event *about* an execution it is
+        # not running inside, so the ambient context is not the right answer.
+        execution_id=approval.execution_id,
     )
     await session.commit()
 

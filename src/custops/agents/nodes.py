@@ -69,6 +69,8 @@ from custops.mcp.tools.schemas import (
     UpdateEntitlementInput,
     UpdateSubscriptionInput,
 )
+from custops.observability.audit import record_event
+from custops.observability.events import ActorType, EventType
 from custops.observability.logging import get_logger
 from custops.providers.base import EmbeddingProvider
 from custops.providers.chat import ChatProvider
@@ -133,6 +135,39 @@ def _decision(
     )
 
 
+async def _emit(
+    deps: NodeDependencies,
+    state: WorkflowState,
+    event_type: EventType,
+    *,
+    actor_type: ActorType = ActorType.AGENT,
+    actor_id: str | None = None,
+    entity_type: str | None = None,
+    entity_id: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    """Record a workflow event from a node that holds no session.
+
+    Opens and commits its own session, matching this module's rule that a
+    session never spans nodes. An audit write that failed to commit would leave
+    a trace claiming less happened than did, so it commits independently of
+    whatever the node goes on to do.
+    """
+    async with deps.session_factory() as session:
+        await record_event(
+            session,
+            event_type,
+            actor_type=actor_type,
+            actor_id=actor_id,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            payload=payload,
+            execution_id=state.get("execution_id"),
+            request_id=state.get("request_id"),
+        )
+        await session.commit()
+
+
 def _tool_context(session: AsyncSession, state: WorkflowState, role: str) -> ToolContext:
     return ToolContext(
         session=session,
@@ -154,6 +189,21 @@ def build_nodes(deps: NodeDependencies) -> NodeSet:
             schema=RequestClassification,
         )
         now = deps.clock()
+
+        await _emit(
+            deps,
+            state,
+            EventType.WORKFLOW_CLASSIFIED,
+            actor_id=Role.SUPERVISOR,
+            entity_type="workflow_execution",
+            entity_id=str(state.get("execution_id")),
+            payload={
+                "workflow_type": str(classification.workflow_type),
+                "customer_ref": classification.customer_ref,
+                "target_plan_code": classification.target_plan_code,
+                "confidence": classification.confidence,
+            },
+        )
 
         return {
             "workflow_type": classification.workflow_type,
@@ -178,6 +228,21 @@ def build_nodes(deps: NodeDependencies) -> NodeSet:
             system=PLANNER_SYSTEM,
             user=f"Request: {state['raw_request']}\nWorkflow: {state.get('workflow_type')}",
             schema=PlanDraft,
+        )
+
+        await _emit(
+            deps,
+            state,
+            EventType.PLAN_CREATED,
+            actor_id=Role.PLANNER,
+            entity_type="workflow_execution",
+            entity_id=str(state.get("execution_id")),
+            # Step names and count, not the planner's prose: a plan is a
+            # conclusion, and the drafting that produced it is not stored.
+            payload={
+                "step_count": len(draft.steps),
+                "steps": [step.model_dump().get("name") for step in draft.steps],
+            },
         )
 
         return {
@@ -209,6 +274,18 @@ def build_nodes(deps: NodeDependencies) -> NodeSet:
 
             account_id = customer.accounts[0].id
             context = _tool_context(session, state, Role.RESEARCH)
+
+            await record_event(
+                session,
+                EventType.RETRIEVAL_STARTED,
+                actor_type=ActorType.AGENT,
+                actor_id=Role.RESEARCH,
+                entity_type="account",
+                entity_id=str(account_id),
+                payload={"customer_ref": customer_ref},
+                execution_id=state.get("execution_id"),
+                request_id=state.get("request_id"),
+            )
             evidence: list[dict[str, Any]] = [
                 {
                     "source": "account",
@@ -302,6 +379,28 @@ def build_nodes(deps: NodeDependencies) -> NodeSet:
             elif knowledge.error is not None:
                 errors.append(_error("research", knowledge.error))
 
+            # Counts and the sufficiency verdict — never the retrieved text.
+            # Evidence content already lives in the workflow state; duplicating
+            # it here would bloat every trace for no added accountability.
+            await record_event(
+                session,
+                EventType.RETRIEVAL_COMPLETED,
+                actor_type=ActorType.AGENT,
+                actor_id=Role.RESEARCH,
+                entity_type="account",
+                entity_id=str(account_id),
+                payload={
+                    "evidence_count": len(evidence),
+                    "sources": sorted({str(item["source"]) for item in evidence}),
+                    "sufficient": sufficient,
+                    "confidence": confidence,
+                    "reason": reason,
+                    "error_count": len(errors),
+                },
+                execution_id=state.get("execution_id"),
+                request_id=state.get("request_id"),
+            )
+
             await session.commit()
 
         return {
@@ -373,6 +472,19 @@ def build_nodes(deps: NodeDependencies) -> NodeSet:
 
         blockers = [str(finding.code) for finding in assessment.eligibility.blockers]
         if blockers:
+            await _emit(
+                deps,
+                state,
+                EventType.DECISION_MADE,
+                actor_id=Role.EXECUTION,
+                entity_type="account",
+                entity_id=str(account_id),
+                payload={
+                    "decision": "upgrade_eligibility",
+                    "outcome": "blocked",
+                    "blockers": blockers,
+                },
+            )
             return {
                 "decisions": [
                     _decision(
@@ -448,6 +560,29 @@ def build_nodes(deps: NodeDependencies) -> NodeSet:
                 )
             )
 
+        await _emit(
+            deps,
+            state,
+            EventType.DECISION_MADE,
+            actor_id=Role.EXECUTION,
+            entity_type="account",
+            entity_id=str(account_id),
+            # Conclusions only: what was decided, what it costs, whether a human
+            # is needed and why. Never how the assessment reasoned (Rule 18).
+            payload={
+                "decision": "upgrade_eligibility",
+                "outcome": "eligible",
+                "amount": str(assessment.proration.amount_due),
+                "currency": assessment.proration.currency,
+                "approval_required": needs_approval,
+                "approval_triggers": [
+                    *(str(t) for t in assessment.approval.triggers),
+                    *extra_triggers,
+                ],
+                "specialist": consult.as_trace(),
+            },
+        )
+
         return {
             "decisions": decisions,
             "approval_status": (
@@ -483,11 +618,40 @@ def build_nodes(deps: NodeDependencies) -> NodeSet:
                 status=ConsultStatus.UNAVAILABLE,
                 detail="No billing specialist is configured.",
             )
-        return await deps.billing_specialist.request_pricing_decision(
+        # The pair brackets the process boundary. An agent-to-agent hop is
+        # exactly where a correlation id goes missing, so both events are
+        # written on *this* side under this execution — the specialist records
+        # its own tool calls independently under the same id.
+        await _emit(
+            deps,
+            state,
+            EventType.A2A_REQUEST_SENT,
+            actor_id="orchestrator",
+            entity_type="agent",
+            entity_id="billing-specialist",
+            payload={
+                "capability": "billing.pricing_decision",
+                "account_id": str(account_id),
+                "target_plan_code": target,
+            },
+        )
+
+        result = await deps.billing_specialist.request_pricing_decision(
             account_id=account_id,
             target_plan_code=target,
             execution_id=state.get("execution_id"),
         )
+
+        await _emit(
+            deps,
+            state,
+            EventType.A2A_RESPONSE_RECEIVED,
+            actor_id="orchestrator",
+            entity_type="agent",
+            entity_id="billing-specialist",
+            payload=result.as_trace(),
+        )
+        return result
 
     def _escalate_update(reason: str) -> dict[str, Any]:
         return {
@@ -545,6 +709,26 @@ def build_nodes(deps: NodeDependencies) -> NodeSet:
                     ),
                     requested_at=now,
                 )
+            )
+            # Same transaction as the PENDING row: an approval that exists with
+            # no audit trail, or an audited request with no row to decide on,
+            # would each be worse than neither.
+            await record_event(
+                session,
+                EventType.APPROVAL_REQUESTED,
+                actor_type=ActorType.AGENT,
+                actor_id=Role.EXECUTION,
+                entity_type="account",
+                entity_id=str(account_id),
+                payload={
+                    "approval_id": str(approval_id),
+                    "action": "subscription_upgrade",
+                    "target_plan_code": state.get("target_plan_code"),
+                    "amount": metadata.get("proration_amount"),
+                    "triggers": metadata.get("approval_triggers", []),
+                },
+                execution_id=execution_id,
+                request_id=state.get("request_id"),
             )
             await session.commit()
 
@@ -738,6 +922,18 @@ def build_nodes(deps: NodeDependencies) -> NodeSet:
         async with deps.session_factory() as session:
             context = _tool_context(session, state, Role.VALIDATOR)
 
+            await record_event(
+                session,
+                EventType.VALIDATION_STARTED,
+                actor_type=ActorType.AGENT,
+                actor_id=Role.VALIDATOR,
+                entity_type="account",
+                entity_id=str(account_id),
+                payload={"expected_plan_code": target},
+                execution_id=state.get("execution_id"),
+                request_id=state.get("request_id"),
+            )
+
             billing = await execute_tool(
                 context,
                 ToolName.GET_SUBSCRIPTION,
@@ -773,6 +969,22 @@ def build_nodes(deps: NodeDependencies) -> NodeSet:
         results = validate_upgrade(ExpectedState(plan_code=target), observed)
         verdict = overall_verdict(results)
         diverged = divergent_systems(results)
+
+        # The cross-system verdict, and which systems disagreed. This is the
+        # event that answers "was the outcome actually real?" (§14).
+        await _emit(
+            deps,
+            state,
+            EventType.VALIDATION_COMPLETED,
+            actor_id=Role.VALIDATOR,
+            entity_type="account",
+            entity_id=str(account_id),
+            payload={
+                "verdict": str(verdict),
+                "diverged_systems": sorted(diverged),
+                "checks": len(results),
+            },
+        )
 
         update: dict[str, Any] = {"validation_results": results}
         if verdict != ValidationVerdict.PASS:

@@ -92,6 +92,36 @@ class AuditEventOut(BaseModel):
     entity_type: str | None
     entity_id: str | None
     occurred_at: datetime
+    # Passed through the redaction boundary on the way out. The recorder already
+    # redacted on the way in; doing it again here is deliberate, because this is
+    # the boundary that actually discloses, and rows may predate the recorder.
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class TimelineEntryOut(BaseModel):
+    """One thing that happened, from whichever layer recorded it (§16).
+
+    The unified view. Steps, tool calls and audit events are written by
+    different layers and only become a *trace* once merged and ordered — and
+    ``kind`` is kept so a reader can still tell which layer said what.
+    """
+
+    kind: str
+    at: datetime
+    label: str
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+
+class EventCoverageOut(BaseModel):
+    """Which §16 events this execution produced, and which it did not.
+
+    A workflow that finished without ever emitting ``validation_completed`` did
+    not validate. That is far easier to see as a missing name than by reading a
+    timeline top to bottom.
+    """
+
+    emitted: list[str]
+    missing: list[str]
 
 
 class WorkflowTraceOut(BaseModel):
@@ -118,4 +148,7 @@ class WorkflowTraceOut(BaseModel):
     steps: list[StepOut]
     tool_calls: list[ToolCallOut]
     audit_events: list[AuditEventOut]
+    # The merged, deterministically ordered view of all three record types.
+    timeline: list[TimelineEntryOut] = Field(default_factory=list)
+    event_coverage: EventCoverageOut | None = None
     final_state: dict[str, Any]

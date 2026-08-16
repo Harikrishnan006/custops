@@ -32,7 +32,6 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from custops.domain.models.approval import ToolCall
-from custops.domain.models.audit import AuditEvent
 from custops.mcp.permissions.matrix import (
     PermissionDeniedError,
     ToolPolicy,
@@ -46,6 +45,7 @@ from custops.mcp.tools.results import (
     ToolExecutionError,
     ToolResult,
 )
+from custops.observability.audit import record_event
 from custops.observability.events import ActorType, EventType
 from custops.observability.logging import get_logger
 
@@ -74,6 +74,20 @@ class _Outcome:
 
     payload: BaseModel
     approval_id: uuid.UUID | None
+
+
+@dataclass
+class _Invocation:
+    """Did the handler actually run?
+
+    Plain Python state, deliberately. The handler runs inside a savepoint, so an
+    audit row written next to it would be rolled back when the handler raises —
+    and "the tool was called and then failed" is precisely the fact a trace most
+    needs to keep. Recording it in memory and writing it afterwards, outside the
+    savepoint, is what makes ``tool_called`` survive the rollback.
+    """
+
+    called: bool = False
 
 
 async def execute_tool(
@@ -105,6 +119,22 @@ async def execute_tool(
     """
     started = time.perf_counter()
     started_at = datetime.now(UTC)
+    invocation = _Invocation()
+
+    # The agent chose this tool. Recorded before permission is even checked, so
+    # a denied attempt still shows what was attempted — which is the whole point
+    # of auditing a refusal.
+    await record_event(
+        context.session,
+        EventType.TOOL_SELECTED,
+        actor_type=ActorType.AGENT,
+        actor_id=context.role,
+        entity_type="tool",
+        entity_id=tool,
+        payload={"arguments": _safe_dump(arguments)},
+        execution_id=context.execution_id,
+        request_id=context.request_id,
+    )
 
     try:
         policy = check_permission(context.role, tool)
@@ -118,6 +148,7 @@ async def execute_tool(
                 approval_entity,
                 approval_action=approval_action,
                 consume_approval=consume_approval,
+                invocation=invocation,
             )
 
     except PermissionDeniedError as error:
@@ -129,10 +160,18 @@ async def execute_tool(
             str(error),
             started,
             started_at,
+            invocation,
         )
     except UnknownToolError as error:
         return await _fail(
-            context, tool, arguments, ToolErrorCode.INVALID_INPUT, str(error), started, started_at
+            context,
+            tool,
+            arguments,
+            ToolErrorCode.INVALID_INPUT,
+            str(error),
+            started,
+            started_at,
+            invocation,
         )
     except ToolExecutionError as error:
         return await _fail(
@@ -143,6 +182,7 @@ async def execute_tool(
             error.message,
             started,
             started_at,
+            invocation,
             details=error.details,
         )
     except Exception as error:  # a tool never raises at its boundary
@@ -158,6 +198,7 @@ async def execute_tool(
             f"{type(error).__name__} while executing '{tool}'.",
             started,
             started_at,
+            invocation,
         )
 
     await _record(
@@ -171,6 +212,7 @@ async def execute_tool(
         started=started,
         started_at=started_at,
         approval_id=outcome.approval_id,
+        invocation=invocation,
     )
     return ToolResult(ok=True, data=outcome.payload)
 
@@ -185,6 +227,7 @@ async def _authorise_and_run(
     *,
     approval_action: str | None = None,
     consume_approval: bool = True,
+    invocation: _Invocation,
 ) -> _Outcome:
     """Verify approval where required, then run the handler."""
     approval_id: uuid.UUID | None = None
@@ -214,6 +257,9 @@ async def _authorise_and_run(
         )
         approval_id = approval.id
 
+    # Marked before the await, so a handler that raises is still recorded as
+    # having been called.
+    invocation.called = True
     payload = await handler(context, arguments)
     return _Outcome(payload=payload, approval_id=approval_id)
 
@@ -226,6 +272,7 @@ async def _fail(
     message: str,
     started: float,
     started_at: datetime,
+    invocation: _Invocation,
     details: dict[str, Any] | None = None,
 ) -> ToolResult[Any]:
     await _record(
@@ -239,6 +286,7 @@ async def _fail(
         started=started,
         started_at=started_at,
         approval_id=None,
+        invocation=invocation,
     )
     logger.warning("tool_failed", tool=tool, code=str(code), role=context.role)
     return ToolResult(ok=False, error=ToolError(code=code, message=message, details=details or {}))
@@ -256,6 +304,7 @@ async def _record(
     started: float,
     started_at: datetime,
     approval_id: uuid.UUID | None,
+    invocation: _Invocation,
 ) -> None:
     """Write the tool_calls and audit_events rows (§8).
 
@@ -281,23 +330,38 @@ async def _record(
         )
     )
 
-    context.session.add(
-        AuditEvent(
-            execution_id=context.execution_id,
-            request_id=context.request_id,
-            event_type=EventType.TOOL_COMPLETED,
+    # Written here rather than beside the handler because the handler runs in a
+    # savepoint: a row written there vanishes when the handler raises, losing
+    # exactly the fact that the tool *was* called before it failed. Emitted
+    # before the completion event so insertion order matches causal order.
+    if invocation.called:
+        await record_event(
+            context.session,
+            EventType.TOOL_CALLED,
             actor_type=ActorType.AGENT,
             actor_id=context.role,
             entity_type="tool",
             entity_id=tool,
-            payload={
-                "succeeded": succeeded,
-                "error_code": error_code,
-                "duration_ms": duration_ms,
-            },
+            payload={"started_at": started_at.isoformat()},
+            execution_id=context.execution_id,
+            request_id=context.request_id,
         )
+
+    await record_event(
+        context.session,
+        EventType.TOOL_COMPLETED,
+        actor_type=ActorType.AGENT,
+        actor_id=context.role,
+        entity_type="tool",
+        entity_id=tool,
+        payload={
+            "succeeded": succeeded,
+            "error_code": error_code,
+            "duration_ms": duration_ms,
+        },
+        execution_id=context.execution_id,
+        request_id=context.request_id,
     )
-    await context.session.flush()
 
 
 def _safe_dump(model: BaseModel) -> dict[str, Any]:

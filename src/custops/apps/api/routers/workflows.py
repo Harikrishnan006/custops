@@ -26,8 +26,10 @@ from custops.apps.api.dependencies import get_database
 from custops.apps.api.schemas.workflow import (
     ApprovalPromptOut,
     AuditEventOut,
+    EventCoverageOut,
     StartWorkflowRequest,
     StepOut,
+    TimelineEntryOut,
     ToolCallOut,
     WorkflowRunOut,
     WorkflowTraceOut,
@@ -39,6 +41,9 @@ from custops.db.engine import Database
 from custops.domain.models.approval import ToolCall
 from custops.domain.models.audit import AuditEvent
 from custops.domain.models.workflow import WorkflowExecution, WorkflowStep
+from custops.observability.events import WORKFLOW_EVENT_NAMES
+from custops.observability.redaction import redact
+from custops.observability.trace import build_timeline, event_coverage
 from custops.providers.chat import ChatProvider, DeterministicChatProvider
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
@@ -131,10 +136,17 @@ async def get_workflow_trace(execution_id: uuid.UUID, session: SessionDep) -> Wo
             await session.execute(
                 select(AuditEvent)
                 .where(AuditEvent.execution_id == execution_id)
-                .order_by(AuditEvent.occurred_at)
+                # `occurred_at` defaults to PostgreSQL now(), which is
+                # *transaction* time — every row written in one transaction
+                # shares it. `id` is monotonic, so it breaks the tie in exact
+                # insertion order. Without it a tool's completion can sort
+                # before the call that produced it.
+                .order_by(AuditEvent.occurred_at, AuditEvent.id)
             )
         ).scalars()
     )
+
+    coverage = event_coverage(events, WORKFLOW_EVENT_NAMES)
 
     return WorkflowTraceOut(
         execution_id=execution.id,
@@ -177,10 +189,24 @@ async def get_workflow_trace(execution_id: uuid.UUID, session: SessionDep) -> Wo
                 entity_type=event.entity_type,
                 entity_id=event.entity_id,
                 occurred_at=event.occurred_at,
+                payload=redact(event.payload),
             )
             for event in events
         ],
-        final_state=execution.final_state,
+        timeline=[
+            TimelineEntryOut(
+                kind=str(entry.kind),
+                at=entry.at,
+                label=entry.label,
+                detail=entry.detail,
+            )
+            for entry in build_timeline(steps=steps, tool_calls=tool_calls, events=events)
+        ],
+        event_coverage=EventCoverageOut(
+            emitted=sorted(coverage.emitted),
+            missing=sorted(coverage.missing),
+        ),
+        final_state=redact(execution.final_state),
     )
 
 

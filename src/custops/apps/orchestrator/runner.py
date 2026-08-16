@@ -31,10 +31,11 @@ from custops.agents.budgets import BudgetPolicy
 from custops.agents.nodes import NodeDependencies, build_nodes
 from custops.agents.state import WorkflowState, WorkflowStatus, initial_state
 from custops.apps.orchestrator.checkpointer import open_checkpointer
-from custops.apps.orchestrator.graph import compile_graph
+from custops.apps.orchestrator.graph import REPLAN, RETRY, compile_graph
 from custops.config import Settings
 from custops.db.engine import Database
 from custops.domain.models.workflow import WorkflowExecution, WorkflowStep
+from custops.observability.audit import record_event
 from custops.observability.context import bind_context
 from custops.observability.events import ActorType, EventType
 from custops.observability.logging import get_logger
@@ -54,6 +55,7 @@ def _specialist_from(settings: Settings) -> BillingSpecialistClient | None:
         settings.a2a.billing_specialist_url,
         timeout_seconds=settings.a2a.timeout_seconds,
     )
+
 
 # Keys that are graph plumbing rather than workflow state, and must not be
 # persisted as if they were.
@@ -186,6 +188,7 @@ class WorkflowRunner:
                         if isinstance(update, dict):
                             merged.update(update)
                         await self._record_step(execution_id, sequence, node, update, elapsed)
+                        await self._record_budget_event(execution_id, node, update)
                         sequence += 1
 
                 snapshot = await app.aget_state(config)
@@ -212,6 +215,37 @@ class WorkflowRunner:
             steps=visited,
         )
 
+    async def _record_budget_event(self, execution_id: uuid.UUID, node: str, update: Any) -> None:
+        """Emit ``retry`` / ``replan`` when the graph spends a budget (§16).
+
+        Emitted here rather than from the nodes themselves. The retry and replan
+        nodes are graph-owned and deliberately non-substitutable — the
+        termination guarantee depends on them running exactly as written — so
+        handing them a session to write audit rows would give them a failure
+        mode they must not have. The runner already observes every node visit,
+        which makes this the honest place to record one.
+        """
+        event = {RETRY: EventType.RETRY, REPLAN: EventType.REPLAN}.get(node)
+        if event is None:
+            return
+
+        counts = update if isinstance(update, dict) else {}
+        async with self._database.session_factory() as session:
+            await record_event(
+                session,
+                event,
+                actor_type=ActorType.SYSTEM,
+                actor_id="orchestrator",
+                entity_type="workflow_execution",
+                entity_id=str(execution_id),
+                payload={
+                    "retry_count": counts.get("retry_count"),
+                    "replan_count": counts.get("replan_count"),
+                },
+                execution_id=execution_id,
+            )
+            await session.commit()
+
     # -- persistence -------------------------------------------------------
 
     async def _record_started(self, state: WorkflowState) -> None:
@@ -226,6 +260,22 @@ class WorkflowRunner:
                     started_at=state["started_at"],
                     final_state={},
                 )
+            )
+            # The first event of every trace (§16). The raw request is the one
+            # piece of free text worth keeping: it is what the customer actually
+            # asked for, and every later decision is judged against it.
+            await record_event(
+                session,
+                EventType.REQUEST_RECEIVED,
+                actor_type=ActorType.USER,
+                entity_type="workflow_execution",
+                entity_id=str(state["execution_id"]),
+                payload={
+                    "raw_request": state["raw_request"],
+                    "request_id": state.get("request_id"),
+                },
+                execution_id=state["execution_id"],
+                request_id=state.get("request_id"),
             )
             await session.commit()
 
@@ -271,7 +321,6 @@ class WorkflowRunner:
         *,
         paused: bool,
     ) -> None:
-        from custops.domain.models.audit import AuditEvent
 
         async with self._database.session_factory() as session:
             execution = await session.get(WorkflowExecution, execution_id)
@@ -290,20 +339,19 @@ class WorkflowRunner:
                 # one in every report that filters on finished_at.
                 execution.finished_at = None if paused else datetime.now(UTC)
 
-            session.add(
-                AuditEvent(
-                    execution_id=execution_id,
-                    event_type=(
-                        EventType.WORKFLOW_COMPLETED
-                        if status == WorkflowStatus.COMPLETED
-                        else EventType.WORKFLOW_FAILED
-                    ),
-                    actor_type=ActorType.SYSTEM,
-                    actor_id="orchestrator",
-                    entity_type="workflow_execution",
-                    entity_id=str(execution_id),
-                    payload={"status": status, "paused": paused},
-                )
+            await record_event(
+                session,
+                (
+                    EventType.WORKFLOW_COMPLETED
+                    if status == WorkflowStatus.COMPLETED
+                    else EventType.WORKFLOW_FAILED
+                ),
+                actor_type=ActorType.SYSTEM,
+                actor_id="orchestrator",
+                entity_type="workflow_execution",
+                entity_id=str(execution_id),
+                payload={"status": status, "paused": paused},
+                execution_id=execution_id,
             )
             await session.commit()
 

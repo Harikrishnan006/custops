@@ -52,3 +52,9 @@ class ActorType(StrEnum):
     USER = "user"
     AGENT = "agent"
     SYSTEM = "system"
+
+
+# The closed §16 vocabulary as plain strings. Derived from the enum rather than
+# restated, so a new event type cannot be added without joining this set — which
+# is what the coverage view and the taxonomy test both read.
+WORKFLOW_EVENT_NAMES: frozenset[str] = frozenset(str(event) for event in EventType)
