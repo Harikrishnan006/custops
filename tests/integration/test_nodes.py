@@ -36,7 +36,7 @@ from custops.agents.state import (
 from custops.agents.validation import overall_verdict
 from custops.db.engine import Database
 from custops.domain.models.approval import Approval, ApprovalStatus
-from custops.domain.models.billing import Plan, Subscription
+from custops.domain.models.billing import Plan
 from custops.domain.models.knowledge import EMBEDDING_DIMENSIONS
 from custops.domain.seed import seed_all, seed_id
 from custops.knowledge.ingestion.pipeline import ingest_contracts, ingest_policies
@@ -267,32 +267,14 @@ class TestExecuteAndValidate:
         state.update(await nodes.research(state))  # type: ignore[arg-type]
         state.update(await nodes.decide(state))  # type: ignore[arg-type]
 
-        # Grant the approvals the tool layer requires, exactly as the approval
-        # gate would.
-        account_id = state["account_id"]
-        async with seeded.session_factory() as session:
-            subscription_id = (
-                await session.execute(
-                    select(Subscription.id).where(Subscription.account_id == account_id)
-                )
-            ).scalar_one()
-            for entity_type, entity_id, action in (
-                ("subscription", str(subscription_id), "subscription_upgrade"),
-                ("account", str(account_id), "update_crm"),
-            ):
-                session.add(
-                    Approval(
-                        id=uuid.uuid4(),
-                        execution_id=state["execution_id"],
-                        action=action,
-                        entity_type=entity_type,
-                        entity_id=entity_id,
-                        status=ApprovalStatus.APPROVED,
-                        reason="Granted for test.",
-                        evidence={},
-                    )
-                )
-            await session.commit()
+        # Grant the approval the tool layer requires, exactly as the approval
+        # gate would. This hand-rolled two per-tool rows scoped to the
+        # subscription, which is the scheme `_grant_upgrade_approval` documents
+        # the system as *not* using — so `verify_approval` looked for
+        # `subscription_upgrade` on the account, found nothing, and the run
+        # failed on a missing approval long before it could reach the
+        # unconfigured-provisioning divergence this test is about.
+        await _grant_upgrade_approval(seeded, state)
 
         execution = await nodes.execute(state)  # type: ignore[arg-type]
         state.update(execution)
