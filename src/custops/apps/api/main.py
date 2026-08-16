@@ -56,14 +56,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         redis=settings.redis.safe_dsn,
     )
 
-    # The one eager connection, and it earns the exception. The checkpointer's
-    # tables must exist before any workflow runs, and creating them inside a
-    # request deadlocks that request against its own authentication transaction
-    # (see `ensure_checkpointer_ready`). Doing it here also means it happens
-    # once per process rather than once per execution.
-    await ensure_checkpointer_ready(settings)
-
     try:
+        # The one eager connection, and it earns the exception. The
+        # checkpointer's tables must exist before any workflow runs, and
+        # creating them inside a request deadlocks that request against its own
+        # authentication transaction (see `ensure_checkpointer_ready`). Doing it
+        # here also means it happens once per process rather than once per
+        # execution.
+        #
+        # Inside the `try` so that a failure still releases the engine and the
+        # Redis client. Startup is exactly when a leak is easiest to miss: the
+        # process is about to die anyway, so nothing complains — until something
+        # runs several applications in one process, as the tests do.
+        await ensure_checkpointer_ready(settings)
+
         yield
     finally:
         await database.dispose()

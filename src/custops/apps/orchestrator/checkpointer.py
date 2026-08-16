@@ -188,20 +188,5 @@ async def open_checkpointer(
     # authentication transaction. The plain DSN is deliberate too: the lock
     # ceiling is a property of the setup DDL, and imposing it on ordinary
     # checkpoint writes would be an unrelated constraint on the request path.
-    connect_started = perf_counter()
     async with AsyncPostgresSaver.from_conn_string(conn_string) as saver:
-        logger.info(
-            "checkpointer_connected",
-            elapsed_ms=round((perf_counter() - connect_started) * 1000, 1),
-        )
-
-        ready_at = perf_counter()
-        try:
-            yield saver
-        finally:
-            # How long the caller held it — separates "the checkpointer was slow"
-            # from "the graph run itself was".
-            logger.info(
-                "checkpointer_released",
-                elapsed_ms=round((perf_counter() - ready_at) * 1000, 1),
-            )
+        yield saver
