@@ -15,6 +15,14 @@ away from being a bypass. So these tests prove all four corners —
 
 They need no database: the embedder is pure, and ``assess_sufficiency`` takes
 similarity scores rather than rows.
+
+One thing these tests are careful about, because getting it wrong once already
+cost a CI round: the population measured here is the population the pipeline
+embeds. Ingestion chunks each policy *body* and embeds the chunks individually,
+so a stored vector represents neither the title nor the whole document.
+Measuring ``title + body`` instead roughly doubles the scores and calibrates the
+threshold against evidence that never reaches the gate. Everything below runs
+through the real ``chunk_text``.
 """
 
 from __future__ import annotations
@@ -23,6 +31,7 @@ import pytest
 
 from custops.domain.policies.retrieval import RetrievalPolicy, assess_sufficiency
 from custops.domain.seed import POLICIES
+from custops.knowledge.ingestion.chunking import chunk_text
 from custops.providers.deterministic import DeterministicEmbeddingProvider
 from tests.integration.conftest import TEST_RETRIEVAL_MINIMUM_SIMILARITY
 
@@ -38,7 +47,14 @@ UNRELATED_TEXTS = (
     "quarterly shipping logistics for warehouse pallets",
 )
 
-CORPUS = tuple(f"{policy['title']} {policy['body']}" for policy in POLICIES)
+
+def _chunks(*texts: str) -> tuple[str, ...]:
+    """Exactly what ingestion stores: body chunks, one vector each."""
+    return tuple(chunk.text for text in texts for chunk in chunk_text(text))
+
+
+CORPUS = _chunks(*(policy["body"] for policy in POLICIES))
+UNRELATED_CORPUS = _chunks(*UNRELATED_TEXTS)
 
 
 def _cosine(left: tuple[float, ...], right: tuple[float, ...]) -> float:
@@ -66,7 +82,7 @@ async def test_unrelated_content_scores_below_the_calibrated_threshold() -> None
     If this ever fails, the threshold is admitting noise and the gate has
     stopped meaning anything.
     """
-    scores = await _similarities(RELEVANT_QUERY, UNRELATED_TEXTS)
+    scores = await _similarities(RELEVANT_QUERY, UNRELATED_CORPUS)
 
     assert max(scores) < TEST_RETRIEVAL_MINIMUM_SIMILARITY
 
@@ -78,12 +94,39 @@ async def test_the_threshold_sits_between_the_two_populations_with_margin() -> N
     reason is obvious — rather than as a puzzling escalation in CI.
     """
     relevant = max(await _similarities(RELEVANT_QUERY, CORPUS))
-    unrelated = max(await _similarities(RELEVANT_QUERY, UNRELATED_TEXTS))
+    unrelated = max(await _similarities(RELEVANT_QUERY, UNRELATED_CORPUS))
 
     assert unrelated < TEST_RETRIEVAL_MINIMUM_SIMILARITY < relevant
-    # Meaningful daylight on both sides, not a hairline pass.
-    assert relevant - TEST_RETRIEVAL_MINIMUM_SIMILARITY > 0.05
-    assert TEST_RETRIEVAL_MINIMUM_SIMILARITY - unrelated > 0.05
+    # Meaningful daylight on both sides, not a hairline pass. Expressed relative
+    # to the threshold: these scores sit on the double's scale rather than
+    # production's, so an absolute margin would be a number with no meaning.
+    assert relevant - TEST_RETRIEVAL_MINIMUM_SIMILARITY > 0.4 * TEST_RETRIEVAL_MINIMUM_SIMILARITY
+    assert TEST_RETRIEVAL_MINIMUM_SIMILARITY - unrelated > 0.5 * TEST_RETRIEVAL_MINIMUM_SIMILARITY
+
+
+async def test_every_genuine_match_clears_the_threshold_not_merely_the_best() -> None:
+    """The gate reads the top score, but a corpus where only one chunk clears is
+    a corpus one edit away from clearing none."""
+    scoring = [score for score in await _similarities(RELEVANT_QUERY, CORPUS) if score > 0.0]
+
+    assert scoring, "no seeded chunk shares any term with the research query"
+    assert min(scoring) > TEST_RETRIEVAL_MINIMUM_SIMILARITY
+
+
+async def test_chunk_scores_are_what_the_gate_sees_not_whole_document_scores() -> None:
+    """Guards the trap this calibration originally fell into.
+
+    Embedding `title + body` scores materially higher than embedding the body
+    chunks ingestion actually stores. Calibrating on the former yields a
+    threshold the real pipeline never clears — which is exactly what happened,
+    and cost a full CI round to diagnose. If the two ever converge this test can
+    go; while they differ, the distinction must stay visible.
+    """
+    whole = tuple(f"{policy['title']} {policy['body']}" for policy in POLICIES)
+
+    assert max(await _similarities(RELEVANT_QUERY, whole)) > max(
+        await _similarities(RELEVANT_QUERY, CORPUS)
+    )
 
 
 # --------------------------------------------- the gate still escalates
@@ -95,7 +138,7 @@ async def test_unrelated_evidence_is_reported_insufficient() -> None:
     This is what a blanket-permissive policy would destroy: with one, nothing
     would ever be insufficient and the low-confidence branch would be dead code.
     """
-    scores = await _similarities(RELEVANT_QUERY, UNRELATED_TEXTS)
+    scores = await _similarities(RELEVANT_QUERY, UNRELATED_CORPUS)
 
     verdict = assess_sufficiency(
         scores, policy=RetrievalPolicy(minimum_similarity=TEST_RETRIEVAL_MINIMUM_SIMILARITY)

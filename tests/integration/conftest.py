@@ -218,17 +218,26 @@ async def viewer_client(live_app: FastAPI, database: Database) -> AsyncIterator[
 # on a different scale, so the same number would read every result as
 # insufficient and escalate every workflow before it reached a decision.
 #
-# The value below is measured, not chosen. Against the seeded policy corpus and
-# the queries the research node actually issues:
+# The value below is measured, not chosen — and it must be measured against the
+# population the pipeline actually embeds. That is the subtlety that cost a CI
+# round: ingestion chunks the policy *body* and embeds each chunk on its own, so
+# a chunk carries neither the policy title nor the rest of the document. Scores
+# taken against whole `title + body` documents run roughly twice as high as the
+# scores the retrieval gate will really see, and a threshold calibrated on them
+# escalates every workflow anyway.
 #
-#     relevant best-match   +0.1754 … +0.2402
-#     unrelated text        +0.0000  (max and mean, over five samples)
+# Measured over `chunk_text(policy["body"])` for the seeded corpus, against the
+# query the research node actually issues:
 #
-# 0.10 sits between them with room on both sides: ~0.075 below the weakest
-# genuine match and 0.10 above the strongest unrelated one. It is emphatically
-# *not* permissive — `tests/unit/test_retrieval_calibration.py` proves unrelated
-# content still falls short of it and still escalates.
-TEST_RETRIEVAL_MINIMUM_SIMILARITY = 0.10
+#     relevant chunks     +0.0933, +0.0894   (the two policies that bear on it)
+#     unrelated chunks    +0.0000            (exactly zero — no shared stems)
+#
+# 0.05 is the midpoint of those populations, rounded to a round number. It sits
+# below the weaker genuine match with ~44% headroom and above every unrelated
+# one. It is emphatically *not* permissive — unrelated content scores zero and
+# still escalates; `tests/unit/test_retrieval_calibration.py` measures the same
+# chunk population and proves both directions.
+TEST_RETRIEVAL_MINIMUM_SIMILARITY = 0.05
 
 TEST_RETRIEVAL_POLICY = RetrievalPolicy(
     minimum_similarity=TEST_RETRIEVAL_MINIMUM_SIMILARITY
