@@ -40,6 +40,7 @@ from custops.domain.models.billing import Plan
 from custops.domain.models.knowledge import EMBEDDING_DIMENSIONS
 from custops.domain.seed import seed_all, seed_id
 from custops.knowledge.ingestion.pipeline import ingest_contracts, ingest_policies
+from custops.mcp.tools.results import ToolErrorCode
 from custops.providers.chat import DeterministicChatProvider
 from custops.providers.deterministic import DeterministicEmbeddingProvider
 from custops.provisioning.client import StubProvisioningClient
@@ -256,6 +257,12 @@ class TestExecuteAndValidate:
         change and nothing provisions the entitlement. Validation must refuse to
         pass rather than declare success from two agreeing systems.
 
+        "Refuse to pass" means NEEDS_REVIEW here, not FAIL. Both are refusals;
+        the difference is whether anything actually contradicted the intent. No
+        system did — the one that could have is the one that could not be
+        consulted — so the honest verdict is that nobody knows, and §14 keeps
+        that distinct from knowing the outcome was wrong.
+
         Phase 8 added the provisioning step, so this is now the *unconfigured*
         path rather than the only path — see
         ``test_a_fully_provisioned_execution_passes_validation`` for the full
@@ -280,10 +287,24 @@ class TestExecuteAndValidate:
         state.update(execution)
         validation = await nodes.validate(state)  # type: ignore[arg-type]
 
-        assert all(r["ok"] for r in execution["execution_results"]), execution["errors"]
+        # Phase 8 added the provisioning step, so execution no longer succeeds
+        # outright on this path: billing and the CRM accept the change and the
+        # entitlement step refuses, because there is no client to drive the
+        # portal with. That refusal is the scenario, not a defect — what would
+        # be a defect is executing the other two and calling the result done.
+        refused = {r["step"]: r for r in execution["execution_results"] if not r["ok"]}
+
+        assert set(refused) == {"update_entitlement"}, execution["execution_results"]
+        assert refused["update_entitlement"]["error_code"] == ToolErrorCode.PRECONDITION_FAILED
 
         results = validation["validation_results"]
-        assert overall_verdict(results) == ValidationVerdict.FAIL
+        # Not FAIL. Nothing contradicted the intent — billing and the CRM both
+        # agree with it — and the one system that could have is the one nobody
+        # could ask. `overall_verdict` ranks FAIL above NEEDS_REVIEW above PASS,
+        # so an unread check collapses the set to "I could not tell", which is
+        # exactly the distinction §14 turns on: unverified is not the same as
+        # wrong, and neither is success.
+        assert overall_verdict(results) == ValidationVerdict.NEEDS_REVIEW
 
         entitlement = next(r for r in results if r["check"] == "entitlement_tier")
         billing = next(r for r in results if r["check"] == "subscription_plan")
