@@ -22,26 +22,40 @@ from datetime import UTC, datetime
 import pytest
 from agent_forge.agent_eval import score_single_trace
 from agent_forge.models import StepType
+from fastapi import FastAPI
 from sqlalchemy import select
 
+from custops.agents.schemas import NotificationDraft, PlanDraft, RequestClassification
+from custops.agents.state import WorkflowType
+from custops.apps.api.routers.workflows import get_chat_provider
 from custops.db.engine import Database
 from custops.domain.models.approval import ToolCall
 from custops.domain.models.audit import AuditEvent
+from custops.domain.models.knowledge import EMBEDDING_DIMENSIONS
 from custops.domain.models.workflow import WorkflowExecution, WorkflowStep
 from custops.domain.seed import clear_seed_data, seed_all
 from custops.evaluation.adapter import ExecutionRecord, to_agent_trace
 from custops.evaluation.runner import load_tasks
+from custops.knowledge.ingestion.pipeline import ingest_contracts, ingest_policies
+from custops.providers.chat import DeterministicChatProvider
+from custops.providers.deterministic import DeterministicEmbeddingProvider
 from tests.integration.conftest import requires_postgres
 
 pytestmark = [pytest.mark.integration, requires_postgres]
 
 NOW = datetime.now(UTC)
+EMBEDDER = DeterministicEmbeddingProvider(dimensions=EMBEDDING_DIMENSIONS)
 
 
 @pytest.fixture
 async def seeded(database: Database) -> AsyncIterator[Database]:
     async with database.session_factory() as session:
         await seed_all(session, now=NOW)
+        # Without the corpus the research node finds nothing and the run
+        # escalates before it reaches a single mutation — which is not the
+        # "genuine Subscription Upgrade" this module says it exercises.
+        await ingest_policies(session, EMBEDDER, now=NOW)
+        await ingest_contracts(session, EMBEDDER, now=NOW)
         await session.commit()
     try:
         yield database
@@ -49,6 +63,37 @@ async def seeded(database: Database) -> AsyncIterator[Database]:
         async with database.session_factory() as session:
             await clear_seed_data(session)
             await session.commit()
+
+
+@pytest.fixture(autouse=True)
+def classified_request(live_app: FastAPI) -> None:
+    """Give the run a classification to act on.
+
+    `live_app` leaves `get_chat_provider` at its default, which is a
+    `DeterministicChatProvider` with *nothing registered*. Asked for a
+    `RequestClassification` it returns `schema()` — a minimal instance built
+    from field defaults, naming no customer and no workflow type — so the
+    supervisor could not classify the request and escalated immediately. The
+    run recorded steps, which is why the neighbouring trace tests passed, but
+    it never reached a node that calls a tool.
+
+    Registering the responses here rather than in `live_app` keeps every other
+    consumer of that fixture unchanged.
+    """
+    chat = DeterministicChatProvider()
+    chat.register(
+        RequestClassification,
+        RequestClassification(
+            workflow_type=WorkflowType.SUBSCRIPTION_UPGRADE,
+            customer_ref="ACME",
+            target_plan_code="enterprise",
+            confidence=0.95,
+            rationale_summary="Explicit upgrade request.",
+        ),
+    )
+    chat.register(PlanDraft, PlanDraft(workflow_type=WorkflowType.SUBSCRIPTION_UPGRADE))
+    chat.register(NotificationDraft, NotificationDraft(subject="Upgraded", body="Done."))
+    live_app.dependency_overrides[get_chat_provider] = lambda: chat
 
 
 async def _load_record(database: Database, execution_id: uuid.UUID) -> ExecutionRecord:
