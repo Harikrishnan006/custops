@@ -92,12 +92,24 @@ class PlaywrightProvisioningClient:
             await page.click("#signin")
             await page.wait_for_url("**/accounts", timeout=self._settings.timeout_ms)
         except PlaywrightTimeout as error:
+            # Rejected credentials also land here, and that is the whole
+            # subtlety. The portal answers a bad sign-in by redirecting back to
+            # /login rather than returning a status, so waiting for /accounts
+            # never matches and expires. Reporting that as a timeout would
+            # blame the network for the portal's answer — and left the
+            # `login_failed` branch below unreachable, which is what this
+            # ordering fixes. Read the URL before deciding which failure it was.
+            if "/login" in page.url:
+                raise ProvisioningError(
+                    ProvisioningErrorCode.LOGIN_FAILED,
+                    "The portal rejected the provisioning credentials.",
+                ) from error
             raise ProvisioningError(
                 ProvisioningErrorCode.TIMEOUT, "Timed out signing in to the portal."
             ) from error
 
-        # Landing back on /login means the portal rejected the credentials —
-        # it redirects rather than returning a status code.
+        # Kept for the case where the wait resolves on /login rather than
+        # expiring: same conclusion, reached without an exception.
         if "/login" in page.url:
             raise ProvisioningError(
                 ProvisioningErrorCode.LOGIN_FAILED,
