@@ -9,15 +9,43 @@ that either dependency answers — that is what the integration suite is for.
 
 from __future__ import annotations
 
+import ast
+import inspect
+import textwrap
+
+import pytest
 from fastapi import FastAPI
 
+from custops.apps.api import main
 from custops.apps.api.main import create_app
+from custops.apps.orchestrator import checkpointer
 from custops.cache.redis_client import create_redis_client
 from custops.config import Settings
 from custops.db.engine import Database, create_database
 
 
-async def test_lifespan_creates_and_disposes_resources(test_settings: Settings) -> None:
+@pytest.fixture
+def without_checkpointer_setup(monkeypatch: pytest.MonkeyPatch) -> list[Settings]:
+    """Record the startup checkpointer setup instead of performing it.
+
+    The lifespan creates the checkpointer's tables, which is the one thing in it
+    that genuinely reaches PostgreSQL. Stubbing it keeps this module runnable
+    with no infrastructure — its subject is resource wiring and disposal — while
+    the recorded calls still let the tests below assert *that* startup does it.
+    The real DDL is exercised by the integration suite.
+    """
+    calls: list[Settings] = []
+
+    async def _record(settings: Settings) -> None:
+        calls.append(settings)
+
+    monkeypatch.setattr(main, "ensure_checkpointer_ready", _record)
+    return calls
+
+
+async def test_lifespan_creates_and_disposes_resources(
+    test_settings: Settings, without_checkpointer_setup: list[Settings]
+) -> None:
     application = create_app(settings=test_settings)
 
     assert not hasattr(application.state, "database")
@@ -73,3 +101,86 @@ def test_app_exposes_health_route(app: FastAPI) -> None:
     # The degraded case is part of the published contract, not an undocumented
     # surprise for whoever wires up monitoring.
     assert "503" in schema["paths"]["/health"]["get"]["responses"]
+
+
+class TestCheckpointerSchemaIsAStartupConcern:
+    """Where the checkpointer's DDL runs, and where it must never run again.
+
+    `setup()` issues `CREATE INDEX CONCURRENTLY`, which waits for every open
+    transaction that can see the table. Inside a request there is always one —
+    the authentication dependency's own session — so the request waited on a
+    transaction that could not finish until the request did. It survived review
+    because `IF NOT EXISTS` makes the statement a no-op once the indexes exist,
+    so only the first runs against a fresh database ever hung.
+
+    These tests pin both halves of the fix: startup does it, and the per-run
+    path does not.
+    """
+
+    async def test_startup_prepares_the_checkpointer_exactly_once(
+        self, test_settings: Settings, without_checkpointer_setup: list[Settings]
+    ) -> None:
+        application = create_app(settings=test_settings)
+
+        async with application.router.lifespan_context(application):
+            pass
+
+        assert without_checkpointer_setup == [test_settings]
+
+    async def test_each_startup_prepares_its_own_process(
+        self, test_settings: Settings, without_checkpointer_setup: list[Settings]
+    ) -> None:
+        """Once per process, not once per import: a second app prepares again."""
+        for _ in range(2):
+            application = create_app(settings=test_settings)
+            async with application.router.lifespan_context(application):
+                pass
+
+        assert len(without_checkpointer_setup) == 2
+
+    def test_opening_a_checkpointer_does_not_run_setup(self) -> None:
+        """The regression itself.
+
+        Inspecting the function is deliberate: calling `open_checkpointer` for
+        real needs PostgreSQL, and a stubbed saver would only prove the stub
+        was not called. What must stay true is that the per-run path contains
+        no setup call at all.
+
+        Parsed rather than grepped, so that a comment mentioning `setup()` —
+        and there is one, explaining why it is absent — cannot fail the test,
+        and so that `await x.setup()` cannot pass it by being spelled
+        differently.
+        """
+        tree = ast.parse(textwrap.dedent(inspect.getsource(checkpointer.open_checkpointer)))
+
+        called = {
+            node.func.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
+
+        assert "setup" not in called
+
+    def test_startup_is_the_thing_that_runs_setup(self) -> None:
+        """The other half: the call did not simply disappear."""
+        tree = ast.parse(textwrap.dedent(inspect.getsource(checkpointer.ensure_checkpointer_ready)))
+
+        called = {
+            node.func.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
+
+        assert "setup" in called
+
+    def test_startup_failure_is_not_swallowed(self) -> None:
+        """A checkpointer without tables cannot persist a paused workflow (§7).
+
+        Booting anyway would defer that discovery to the first approval pause,
+        which is the worst possible moment to find out.
+        """
+        source = inspect.getsource(main.lifespan)
+
+        assert "ensure_checkpointer_ready" in source
+        # No try/except wrapping it, and no bare continue-on-error.
+        assert "except" not in source.split("ensure_checkpointer_ready")[1].split("yield")[0]

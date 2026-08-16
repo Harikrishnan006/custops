@@ -48,9 +48,15 @@ class CheckpointerError(RuntimeError):
     """Raised when the configured checkpointer cannot be provided safely."""
 
 
-# Ceiling on how long a checkpointer statement may wait for a lock. See
-# `open_checkpointer` for why this exists and why this value.
+# Ceiling on how long the setup DDL may wait. See `ensure_checkpointer_ready`.
 _LOCK_TIMEOUT_MS = 10_000
+
+# Serialises setup across processes. `CREATE INDEX CONCURRENTLY` cannot run
+# while another is in progress on the same table, so N workers all starting at
+# once would race; this makes them queue, and the losers find the indexes
+# already there. Session-level rather than transactional, because
+# `CREATE INDEX CONCURRENTLY` refuses to run inside a transaction block.
+_SETUP_ADVISORY_KEY = 0x0C0570C5  # arbitrary, stable, "custops"-ish
 
 # Who else is connected, what they are running, and — via `pg_blocking_pids` —
 # which of them this session is actually waiting behind. `left(query, 200)`
@@ -89,6 +95,61 @@ async def _blocking_sessions(conn_string: str) -> list[dict[str, Any]]:
         return [{"unavailable": str(error)}]
 
 
+async def ensure_checkpointer_ready(settings: Settings) -> None:
+    """Create the checkpointer's tables. Call once, at startup.
+
+    This used to run on every workflow execution, and that was a deadlock. The
+    library's ``setup()`` issues ``CREATE INDEX CONCURRENTLY``, which by design
+    waits for every open transaction that can see the table to finish. Inside a
+    request there is always one: the authentication dependency's own session,
+    holding a ``users``/``roles`` lookup open for the life of the request. So
+    the request waited for a transaction that could not end until the request
+    did. It only bit the first few runs, because ``IF NOT EXISTS`` makes the
+    statement a no-op once the indexes exist — which is precisely why it looked
+    like a mysterious first-use stall rather than a deadlock.
+
+    At startup no request-scoped transaction exists, so there is nothing to wait
+    behind. Errors propagate: tables that do not exist cannot persist a workflow
+    paused for approval, and §7 requires that persistence, so booting into that
+    state would be a silent liability rather than resilience.
+    """
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+    from psycopg import AsyncConnection
+    from psycopg.conninfo import make_conninfo
+
+    conn_string = settings.postgres.libpq_dsn()
+
+    # Bound the wait. Unbounded, a conflicting session does not make setup slow,
+    # it makes it hang — which is the failure this function exists to end. Ten
+    # seconds is ~5000x the measured setup time (~2ms), so it cannot fire on a
+    # healthy database. It is scoped to this connection alone; the per-run
+    # checkpointer keeps the plain DSN and is not bounded by it.
+    bounded_dsn = make_conninfo(conn_string, options=f"-c lock_timeout={_LOCK_TIMEOUT_MS}")
+
+    started = perf_counter()
+    async with await AsyncConnection.connect(conn_string, autocommit=True) as guard:
+        await guard.execute("SELECT pg_advisory_lock(%s)", (_SETUP_ADVISORY_KEY,))
+        try:
+            async with AsyncPostgresSaver.from_conn_string(bounded_dsn) as saver:
+                await saver.setup()
+        except Exception as error:
+            logger.error(
+                "checkpointer_setup_blocked",
+                elapsed_ms=round((perf_counter() - started) * 1000, 1),
+                error=str(error),
+                blockers=await _blocking_sessions(conn_string),
+            )
+            raise
+        finally:
+            await guard.execute("SELECT pg_advisory_unlock(%s)", (_SETUP_ADVISORY_KEY,))
+
+    logger.info(
+        "checkpointer_ready",
+        elapsed_ms=round((perf_counter() - started) * 1000, 1),
+        database=settings.postgres.db,
+    )
+
+
 @asynccontextmanager
 async def open_checkpointer(
     settings: Settings, *, in_memory: bool = False
@@ -115,63 +176,23 @@ async def open_checkpointer(
     # needed for the Postgres path, and an import error should surface as a
     # checkpointer problem rather than as an unimportable module.
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-    from psycopg.conninfo import make_conninfo
 
     # psycopg speaks the plain postgresql:// scheme; our SQLAlchemy URL carries
     # the +asyncpg driver suffix, which psycopg does not understand.
     conn_string = settings.postgres.libpq_dsn()
 
-    # Bound the lock wait. `setup()` takes DDL locks, and a lock wait has no
-    # timeout by default — so a conflicting session does not make it slow, it
-    # makes it hang, which is exactly what three integration tests do for their
-    # full 120s. Ten seconds is ~5000x the measured setup time (~2ms) and well
-    # under that test timeout, so it cannot fire on a healthy database but
-    # converts an indefinite block into an error naming the relation.
-    #
-    # This applies to the saver's connection rather than to `setup()` alone:
-    # `from_conn_string` takes no per-statement configuration, and the DSN is
-    # the only supported seam. Checkpoint writes are millisecond operations, so
-    # a ten-second ceiling on them is a hang detector, not a constraint.
-    bounded_dsn = make_conninfo(conn_string, options=f"-c lock_timeout={_LOCK_TIMEOUT_MS}")
-
     logger.info("checkpointer_selected", kind="postgres", database=settings.postgres.db)
 
-    # Timing, not ceremony. Three integration tests hang for their full 120s
-    # between `checkpointer_selected` and the run finishing, and the two
-    # candidates — acquiring the psycopg connection, and the setup DDL — are
-    # indistinguishable from the outside. These are structured logs rather than
-    # audit events; the §16 taxonomy stays at 19.
-    #
-    # Read them as a discriminator: neither line means the connection never came
-    # back, the first alone means `setup()` is blocking, and both mean the stall
-    # is further in, after the checkpointer was ready.
+    # No `setup()` here. It belongs to startup — see `ensure_checkpointer_ready`
+    # for why running it inside a request deadlocks against that request's own
+    # authentication transaction. The plain DSN is deliberate too: the lock
+    # ceiling is a property of the setup DDL, and imposing it on ordinary
+    # checkpoint writes would be an unrelated constraint on the request path.
     connect_started = perf_counter()
-    async with AsyncPostgresSaver.from_conn_string(bounded_dsn) as saver:
+    async with AsyncPostgresSaver.from_conn_string(conn_string) as saver:
         logger.info(
             "checkpointer_connected",
             elapsed_ms=round((perf_counter() - connect_started) * 1000, 1),
-        )
-
-        # Creates the checkpointer's own tables if absent. Idempotent, and owned
-        # by the library rather than by our Alembic history.
-        setup_started = perf_counter()
-        try:
-            await saver.setup()
-        except Exception as error:
-            # The lock_timeout above turns an indefinite block into this. Ask
-            # the database who was holding the lock before giving up: by the
-            # time anyone reads the log the sessions are gone, so the answer
-            # has to be captured here or not at all.
-            logger.error(
-                "checkpointer_setup_blocked",
-                elapsed_ms=round((perf_counter() - setup_started) * 1000, 1),
-                error=str(error),
-                blockers=await _blocking_sessions(conn_string),
-            )
-            raise
-        logger.info(
-            "checkpointer_setup_completed",
-            elapsed_ms=round((perf_counter() - setup_started) * 1000, 1),
         )
 
         ready_at = perf_counter()
