@@ -35,6 +35,7 @@ from custops.agents.state import (
     ApprovalState,
     ValidationVerdict,
     WorkflowState,
+    WorkflowStatus,
     WorkflowType,
     initial_state,
 )
@@ -127,6 +128,52 @@ class TestDecisionRouting:
         )
 
         assert route_after_decide(state) == APPROVAL_GATE
+
+    def test_a_refused_decision_escalates_without_executing(self) -> None:
+        """The case the graph could not express until it had this edge.
+
+        `decide` marks a blocked upgrade ESCALATED, but routing only ever chose
+        between the approval gate and execution — so a term-locked contract was
+        decided "blocked" and then executed anyway. The golden dataset's
+        `contract-restriction` scenario is explicit that the run ends at
+        `decide` with read-only tool calls.
+        """
+        state = _state(
+            status=WorkflowStatus.ESCALATED,
+            escalation_reason="Upgrade blocked: contract_term_locked.",
+        )
+
+        assert route_after_decide(state) == ESCALATE
+
+    def test_a_refused_decision_escalates_even_when_approval_is_not_required(self) -> None:
+        """`decide`'s assessment-error path sets exactly this combination.
+
+        It marks the run ESCALATED *and* sets approval to NOT_REQUIRED, so a
+        rule keyed on approval alone would send a failed assessment straight
+        into execution — the refusal must win.
+        """
+        state = _state(
+            status=WorkflowStatus.ESCALATED,
+            approval_status=ApprovalState.NOT_REQUIRED,
+            escalation_reason="Pricing could not be assessed.",
+        )
+
+        assert route_after_decide(state) == ESCALATE
+
+    def test_a_refused_decision_outranks_a_pending_approval(self) -> None:
+        """Refusal is terminal; asking a human to approve it would be theatre."""
+        state = _state(
+            status=WorkflowStatus.ESCALATED,
+            approval_status=ApprovalState.REQUIRED,
+            escalation_reason="Upgrade blocked: outstanding_past_due_invoices.",
+        )
+
+        assert route_after_decide(state) == ESCALATE
+
+    def test_an_ordinary_decision_is_unaffected(self) -> None:
+        """The escalate branch must not swallow the ordinary paths."""
+        assert route_after_decide(_state(approval_status=ApprovalState.NOT_REQUIRED)) == EXECUTE
+        assert route_after_decide(_state(approval_status=ApprovalState.REQUIRED)) == APPROVAL_GATE
 
 
 class TestApprovalRouting:

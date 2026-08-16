@@ -7,6 +7,7 @@ budget policy, and none of them asks a model anything.
 The topology from §7:
 
     supervisor -> planner -> research -> decide
+                                          |- blocked/refused   -> escalate
                                           |- requires_approval -> approval_gate -> execute
                                           \\- auto                                -> execute
     execute -> validate
@@ -29,6 +30,7 @@ from custops.agents.state import (
     ApprovalState,
     ValidationVerdict,
     WorkflowState,
+    WorkflowStatus,
     WorkflowType,
 )
 
@@ -76,12 +78,31 @@ def route_after_research(state: WorkflowState) -> str:
 
 
 def route_after_decide(state: WorkflowState) -> str:
-    """Approval-requiring actions stop at the gate; the rest proceed.
+    """A refused decision escalates; approval-requiring ones stop at the gate.
 
     Note what is *not* here: no branch lets a high-confidence decision skip the
     gate. Confidence is an input to whether approval is required (§13), never a
     reason to bypass it.
+
+    The escalate branch is not in the §7 diagram, which gives ``decide`` only
+    ``approval_gate`` and ``execute``. That diagram predates eligibility
+    blocking and does not model a refused decision at all — but the golden
+    dataset does, and it is unambiguous: the ``contract-restriction`` scenario
+    expects ``research -> decide`` and read-only tool calls, with no ``execute``
+    step. Without this branch a term-locked contract is decided "blocked" and
+    then executed anyway; only the MCP layer's own approval check stops the
+    mutation, which makes D9's third layer the *only* layer rather than the last
+    one.
+
+    ``decide`` sets ``status`` to ESCALATED for all three of its refusals — an
+    assessment error, eligibility blockers, and an unusable specialist reply —
+    so reading the status covers them together. The assessment-error path is the
+    reason this reads ``status`` rather than the blocker list: it sets
+    ``approval_status`` to NOT_REQUIRED explicitly, and would otherwise route a
+    failed assessment straight into execution.
     """
+    if state.get("status") == WorkflowStatus.ESCALATED:
+        return ESCALATE
     if state.get("approval_status") == ApprovalState.REQUIRED:
         return APPROVAL_GATE
     return EXECUTE

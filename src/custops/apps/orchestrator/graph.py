@@ -149,8 +149,13 @@ def build_graph(
     graph.add_conditional_edges(
         RESEARCH, route_after_research, {DECIDE: DECIDE, ESCALATE: ESCALATE}
     )
+    # A decision that refused the request escalates without executing. Omitting
+    # this edge does not make the refusal safe — it makes it unroutable, and the
+    # run proceeds to execute a change it has already declined.
     graph.add_conditional_edges(
-        DECIDE, route_after_decide, {APPROVAL_GATE: APPROVAL_GATE, EXECUTE: EXECUTE}
+        DECIDE,
+        route_after_decide,
+        {APPROVAL_GATE: APPROVAL_GATE, EXECUTE: EXECUTE, ESCALATE: ESCALATE},
     )
     graph.add_conditional_edges(
         APPROVAL_GATE, route_after_approval, {EXECUTE: EXECUTE, ESCALATE: ESCALATE}
