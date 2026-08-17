@@ -2,8 +2,11 @@
 
 An enterprise agentic platform for B2B SaaS customer operations. It receives
 natural-language business requests and converts them into executable, stateful,
-auditable workflows that produce **real state changes across real systems** —
-not text.
+auditable workflows that produce **real state changes in the systems of record**
+— not text. Those systems are modelled inside this repository: billing, the CRM
+and entitlements live in the seeded PostgreSQL database, and the API-less legacy
+system is an in-repo portal application. No third-party or customer-owned system
+is contacted.
 
 ```
 "Upgrade Acme from Professional to Enterprise. Check eligibility, verify the
@@ -39,14 +42,19 @@ not text.
 A request like the one above becomes a **stateful, resumable, audited workflow**
 rather than a paragraph of generated text.
 
-- **Orchestration — LangGraph.** A ten-node state machine: supervisor → planner →
-  research → decide → approval gate → execute → validate → notify, with escalate
-  and complete as terminal states. Routing is pure Python over workflow state; no
-  model decides where the graph goes next.
-- **Enterprise access — MCP.** Agents reach billing, the CRM, pricing, invoices,
-  support history and the knowledge base only through Model Context Protocol
-  tools, each bound to a role in a permission matrix. There is no path from an
-  agent to raw SQL.
+- **Orchestration — LangGraph.** Twelve registered nodes: ten agent nodes —
+  supervisor → planner → research → decide → approval gate → execute → validate →
+  notify, with escalate and complete as terminal states — plus `retry` and
+  `replan` counter nodes, which spend the relevant budget before any work is
+  repeated. Routing is pure Python over workflow state; no model decides where
+  the graph goes next.
+- **Enterprise access — MCP.** **Every mutation goes through** Model Context
+  Protocol tools — billing, the CRM, entitlements, refunds, notifications — each
+  bound to a role in a permission matrix, and each re-verifying approval before
+  it acts. Some *reads* use domain services directly with a session: resolving a
+  customer reference, and the validator re-reading each system of record. The
+  latter is deliberate — a validator that queried our own mirror of a system
+  would be checking our side of the integration and proving nothing.
 - **Specialist consultation — A2A.** A billing specialist runs as a genuinely
   separate process, discovered by agent card and reached over a socket. It may
   read and advise; it can neither approve nor mutate.
